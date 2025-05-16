@@ -1,0 +1,16 @@
+[package]
+name = "Hurricanes"
+version = "1.0.0"
+edition = "2024"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# These fields configure default behavior for uploads with `cargo v5`.
+[package.metadata.v5]
+upload-strategy = "differential"
+slot = 2
+icon = "planets"
+compress = true
+
+[dependencies]
+vexide = "0.7.0"
