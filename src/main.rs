@@ -136,6 +136,10 @@ impl Compete for Robot {
             println!("Angle trigger activated");
         });
         self.chassis.turn_to_angle(0.0, 11.0).await;
+        self.chassis.triggers.add_index_trigger(3, || {
+            println!("Distance trigger activated");
+        }); 
+        self.chassis.drive_ptp(&points).await;
     }
 
     async fn driver(&mut self) {

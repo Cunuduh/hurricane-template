@@ -6,7 +6,6 @@ pub enum TriggerCondition {
     Distance(f64),
     Index(usize),
     Angle(f64),
-    
 }
 
 struct Trigger {
@@ -44,42 +43,26 @@ impl TriggerManager {
         });
     }
 
-    pub fn check_distance(&mut self, current: f64) {
-        let mut i = 0;
-        while i < self.triggers.len() {
-            let remove = matches!(&self.triggers[i].cond, TriggerCondition::Distance(d) if current.abs() >= *d);
-            if remove {
-                let mut t = self.triggers.remove(i);
-                (t.callback)();
+    pub fn check(&mut self, mut matcher: impl FnMut(&TriggerCondition) -> bool) {
+        self.triggers.retain_mut(|trigger| {
+            if matcher(&trigger.cond) {
+                (trigger.callback)();
+                false
             } else {
-                i += 1;
+                true
             }
-        }
+        });
+    }
+
+    pub fn check_distance(&mut self, current: f64) {
+        self.check(|cond| matches!(cond, TriggerCondition::Distance(d) if current.abs() >= *d));
     }
 
     pub fn check_index(&mut self, current: usize) {
-        let mut i = 0;
-        while i < self.triggers.len() {
-            let remove = matches!(&self.triggers[i].cond, TriggerCondition::Index(idx) if current >= *idx);
-            if remove {
-                let mut t = self.triggers.remove(i);
-                (t.callback)();
-            } else {
-                i += 1;
-            }
-        }
+        self.check(|cond| matches!(cond, TriggerCondition::Index(idx) if current >= *idx));
     }
 
     pub fn check_angle(&mut self, current: f64) {
-        let mut i = 0;
-        while i < self.triggers.len() {
-            let remove = matches!(&self.triggers[i].cond, TriggerCondition::Angle(a) if current.abs() >= *a);
-            if remove {
-                let mut t = self.triggers.remove(i);
-                (t.callback)();
-            } else {
-                i += 1;
-            }
-        }
+        self.check(|cond| matches!(cond, TriggerCondition::Angle(a) if current.abs() >= *a));
     }
 }

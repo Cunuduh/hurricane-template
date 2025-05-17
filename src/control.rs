@@ -683,11 +683,9 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
     }
 
     pub async fn drive_straight(&mut self, target_dist: f64, max_voltage: f64) {
-        let mut drive_left_pid = self.config.drive_pid;
-        let mut drive_right_pid = self.config.drive_pid;
+        let mut drive_pid = self.config.drive_pid;
         let mut heading_pid = self.config.heading_pid;
-        drive_left_pid.reset();
-        drive_right_pid.reset();
+        drive_pid.reset();
         heading_pid.reset();
         self.stall_timer = None;
 
@@ -698,37 +696,35 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         let mut big_error_timer: Option<Instant> = None;
 
         loop {
-            let current_time = Instant::now();
-            let dt_actual = current_time.duration_since(last_time).as_secs_f64();
-
-            if dt_actual < self.config.dt.as_secs_f64() {
-                sleep(self.config.dt - current_time.duration_since(last_time)).await;
+            let now = Instant::now();
+            let dt = now.duration_since(last_time).as_secs_f64();
+            if dt < self.config.dt.as_secs_f64() {
+                sleep(self.config.dt - now.duration_since(last_time)).await;
                 continue;
             }
-            last_time = current_time;
+            last_time = now;
 
             self.update_odometry();
-            let current_pose = self.odometry.pose();
-
             if self.check_stall() {
                 println!("drive_straight: stall detected");
                 break;
             }
-            let dx = current_pose.x - initial_pose.x;
-            let dy = current_pose.y - initial_pose.y;
-            let current_dist = dx.hypot(dy)
+
+            let current = self.odometry.pose();
+            let dx = current.x - initial_pose.x;
+            let dy = current.y - initial_pose.y;
+            let traveled = (dx.hypot(dy))
                 * (dx * initial_heading.cos() + dy * initial_heading.sin()).signum();
-            self.triggers.check_distance(current_dist.abs());
+            self.triggers.check_distance(traveled.abs());
 
-            let err = target_dist - current_dist;
-
+            let err = target_dist - traveled;
             if err.abs() <= self.config.small_drive_exit_error {
                 big_error_timer = None;
                 if small_error_timer.is_none() {
                     small_error_timer = Some(Instant::now());
                 }
-                if let Some(timer) = small_error_timer {
-                    if timer.elapsed() >= self.config.small_drive_settle_time {
+                if let Some(t) = small_error_timer {
+                    if t.elapsed() >= self.config.small_drive_settle_time {
                         println!("drive_straight: done (small error)");
                         break;
                     }
@@ -739,8 +735,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                     if big_error_timer.is_none() {
                         big_error_timer = Some(Instant::now());
                     }
-                    if let Some(timer) = big_error_timer {
-                        if timer.elapsed() >= self.config.big_drive_settle_time {
+                    if let Some(t) = big_error_timer {
+                        if t.elapsed() >= self.config.big_drive_settle_time {
                             println!("drive_straight: done (big error)");
                             break;
                         }
@@ -749,20 +745,14 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                     big_error_timer = None;
                 }
             }
-            
-            let ll = drive_left_pid.next(err, dt_actual);
-            let lr = drive_right_pid.next(err, dt_actual);
 
-            let eh = self.normalize_angle(initial_heading - current_pose.heading);
-            let ea = heading_pid.next(eh, dt_actual);
+            let u = drive_pid.next(err, dt);
+            let heading_error = self.normalize_angle(initial_heading - current.heading);
+            let tc = heading_pid.next(heading_error, dt)
+                .clamp(-self.config.max_volts, self.config.max_volts);
 
-            let bl = ll.clamp(-max_voltage, max_voltage);
-            let br = lr.clamp(-max_voltage, max_voltage);
-            let tc = ea.clamp(-self.config.max_volts, self.config.max_volts);
-
-            let vl = (bl + tc).clamp(-self.config.max_volts, self.config.max_volts);
-            let vr = (br - tc).clamp(-self.config.max_volts, self.config.max_volts);
-
+            let vl = (u + tc).clamp(-max_voltage, max_voltage);
+            let vr = (u - tc).clamp(-max_voltage, max_voltage);
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(vr); }
         }
