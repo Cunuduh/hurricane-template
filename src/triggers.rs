@@ -1,5 +1,5 @@
 extern crate alloc;
-use alloc::{boxed::Box, collections::{BTreeMap}, string::String, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
 
 
 pub enum TriggerCondition {
@@ -23,14 +23,13 @@ impl TriggerManager {
         TriggerManager { triggers, armed_triggers: Vec::new() }
     }
     pub fn arm<S: AsRef<str>>(&mut self, condition: TriggerCondition, name: S) {
-        if let Some(trigger) = self.triggers.remove(name.as_ref()) {
-            self.armed_triggers.push(Trigger {
-                cond: condition,
-                callback: trigger,
-            });
-        } else {
-            panic!("Trigger with name '{}' not found", name.as_ref());
-        }
+        let name_ref = name.as_ref();
+        let callback = self.triggers.remove(name_ref)
+            .unwrap_or_else(|| panic!("Trigger '{}' not found", name_ref));
+        self.armed_triggers.push(Trigger {
+            cond: condition,
+            callback,
+        });
     }
 
     pub fn check(&mut self, mut matcher: impl FnMut(&TriggerCondition) -> bool) {
