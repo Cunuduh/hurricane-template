@@ -1,158 +1,47 @@
-# vexide Template
+# Setup hurricane-template (Windows)
 
-[![Build status](https://github.com/vexide/vexide-template/actions/workflows/build.yml/badge.svg)](https://github.com/vexide/vexide-template/actions/workflows/build.yml)
+Follow these steps to set up your computer for building and uploading this code to the VEX V5 robot.
 
-> Ready-to-use template for developing VEX V5 robots in Rust.
+## 1. Get the Code
 
-Seasoned vexide user? Delete README.md and update Cargo.toml as needed.
+1. Open Terminal.
+2. Install Git by running this command:
+   ```
+   winget install --id Git.Git -e --source winget
+   ```
+   If asked, approve any prompts to finish the installation.
+3. Choose a folder where you want the code (for example, Desktop).
+4. Run this command in Terminal to download the code:
+   ```
+   git clone https://github.com/Cunuduh/hurricane-template.git
+   ```
+5. Move into the newly created folder:
+   ```
+   cd hurricane-template
+   ```
 
-## Table of Contents
+## 2. Install Rust
 
-- [vexide Template](#vexide-template)
-  - [Table of Contents](#table-of-contents)
-  - [Using This Template](#using-this-template)
-  - [Getting Started (Windows)](#getting-started-windows)
-  - [Getting Started (macOS)](#getting-started-macos)
-  - [Getting Started (NixOS)](#getting-started-nixos)
-  - [Getting Started (Debian/Ubuntu Linux)](#getting-started-debianubuntu-linux)
-  - [Getting Started (Fedora Linux)](#getting-started-fedora-linux)
-  - [Learn](#learn)
-  - [Development](#development)
-    - [Compiling and uploading to a VEX V5 robot](#compiling-and-uploading-to-a-vex-v5-robot)
-    - [Viewing program output](#viewing-program-output)
+Go to [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install) and follow the instructions to install Rust.
 
-## Using This Template
+## 3. Set Up Rust for VEX
 
-To start a project using this template, click the "Use this template" button in the upper right corner of the GitHub repository. Choose an appropriate name and clone the new repository using Git. Finally, update the package name in `Cargo.toml`:
+Copy and paste each line below into Terminal and press Enter after each:
 
-```toml
-[package]
-name = "my-vex-robot"
-version = "0.1.0"
-edition = "2021"
+```
+rustup default nightly
+rustup component add rust-src
+cargo install cargo-v5
 ```
 
-You can also configure your program slot and upload behavior in `Cargo.toml`:
+## 4. Upload Code to the Robot
 
-```toml
-[package.metadata.v5]
-slot = 1
-icon = "cool-x"
-compress = true
-```
+1. Plug the robot brain or controller into your computer with a USB cable.
+2. Make sure you are in the folder with your code (see step 1).
+3. Build and upload the code by running:
+   ```
+   cargo v5 upload
+   ```
+4. Wait for the upload to finish. The robot will be ready to run the new code in slot 2, named "Hurricanes". If the upload fails while plugged into the controller, try unplugging and replugging the USB cable. If that doesn't work, plug the robot brain directly into your computer and try again.
 
-> See our [Building & Uploading tutorial](https://vexide.dev/docs/building-uploading/) for more information.
-
-## Getting Started (Windows)
-
-Follow the instructions [here](https://www.rust-lang.org/tools/install) to install `rustup`.
-
-Run the following commands in Powershell to set up your PC for development on Windows.
-
-- Switch to the `nightly` rust toolchain and add the `rust-src` component:
-
-  ```console
-  rustup default nightly
-  rustup component add rust-src
-  ```
-
-- Install cargo-v5:
-
-  ```console
-  cargo install cargo-v5
-  ```
-
-## Getting Started (macOS)
-
-Follow the instructions [here](https://www.rust-lang.org/tools/install) to install `rustup` on your Mac.
-
-Run the following commands in a terminal window to setup development with vexide.
-
-- Open a terminal and configure `rustup` to build for the V5's platform target:
-
-- Switch to the `nightly` rust toolchain and add the `rust-src` component:
-
-  ```console
-  rustup default nightly
-  rustup component add rust-src
-  ```
-
-- Install cargo-v5:
-
-  ```console
-  cargo install cargo-v5
-  ```
-
-## Getting Started (NixOS)
-
-The Nix flake includes a devshell with every tool you need for building and uploading vexide projects.
-
-There is a `.envrc` file for Nix + Direnv users.
-
-## Getting Started (Debian/Ubuntu Linux)
-
-Follow the instructions [here](https://www.rust-lang.org/tools/install) to install `rustup`. You may also prefer to install it from your system package manager or by other means. Instructions on that can be found [here](https://rust-lang.github.io/rustup/installation/other.html).
-
-Run the following terminal commands to set up development on Debian or Ubuntu.
-
-- Switch to the `nightly` rust toolchain and add the `rust-src` component:
-
-  ```console
-  rustup default nightly
-  rustup component add rust-src
-  ```
-
-- Install cargo-v5:
-
-  ```console
-  cargo install cargo-v5
-  ```
-
-## Getting Started (Fedora Linux)
-
-Run the following terminal commands to set up your PC for development on Fedora.
-
-- Install Rust:
-
-  ```console
-  sudo dnf install rustup
-  rustup-init -y --default-toolchain nightly
-  ```
-
-- Close and reopen the terminal, and finish installing vexide:
-
-  ```console
-  rustup component add rust-src
-  cargo install cargo-v5
-  ```
-
-## Learn
-
-[Check out the documentation](https://vexide.dev/docs/) on the official vexide website for walkthrough-style guides and other helpful learning resources!
-
-An [API reference](https://docs.rs/vexide) is also provided by docs.rs.
-
-## Development
-
-### Compiling and uploading to a VEX V5 robot
-
-Use the cargo-v5 terminal utility to build and upload this vexide project.
-
-```console
-cargo v5 build
-```
-
-Use a USB cable to connect to your robot brain or to your controller before using the `upload` subcommand to build and upload the project. Make sure to specify a program slot.
-
-```console
-cargo v5 upload
-```
-
-### Viewing program output
-
-You can view panic messages and calls to `println!()` using the terminal.
-Use a USB cable to connect to your robot brain or controller, then start the terminal:
-
-```console
-cargo v5 terminal
-```
+If you see any errors unrelated to uploading the code, let me know!
