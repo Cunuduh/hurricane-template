@@ -7,7 +7,7 @@ use vexide::{
     time::Instant,
 };
 
-use crate::odometry::{Odometry, Pose};
+use crate::odometry::{Odometry, Pose, TrackingWheelConfig};
 use crate::pid::Pid;
 use crate::utils::path::{interpolate_catmull_rom, interpolate_linear};
 use crate::triggers::TriggerManager;
@@ -30,7 +30,7 @@ pub trait Pos2Like {
     fn distance(&self, other: &Self) -> f64 {
         let dx = self.x() - other.x();
         let dy = self.y() - other.y();
-        (dx.powi(2) + dy.powi(2)).sqrt()
+        dx.hypot(dy)
     }
     fn lerp(&self, other: &Self, t: f64) -> Self;
 }
@@ -81,12 +81,16 @@ pub struct ChassisConfig {
     pub stall_velocity_threshold: f64,
     pub stall_time: Duration,
     
-    pub accel_t: f64
+    pub accel_t: f64,
+
+    pub tw_config: Option<TrackingWheelConfig>,
 }
 
 pub struct Chassis<const L: usize, const R: usize> {
     pub left_motors: [Motor; L],
     pub right_motors: [Motor; R],
+    pub parallel_wheel: RotationSensor,
+    pub perpendicular_wheel: RotationSensor,
     pub config: ChassisConfig,
     pub imu: InertialSensor,
     pub controller: Controller,
@@ -105,6 +109,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         controller: Controller,
         mut left_motors: [Motor; L],
         mut right_motors: [Motor; R],
+        mut parallel_wheel: RotationSensor,
+        mut perpendicular_wheel: RotationSensor,
         mut imu: InertialSensor,
         config: ChassisConfig,
     ) -> Self {
@@ -121,12 +127,14 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         for m in right_motors.iter_mut() {
             let _ = m.reset_position();
         }
-
+        let _ = parallel_wheel.reset_position();
+        let _ = perpendicular_wheel.reset_position();
         let odometry = Odometry::new(
             config.initial_pose, 
             config.wheel_diameter,
             config.track_width,
             config.ext_gear_ratio,
+            config.tw_config,
         );
         let motor_free_rpm = match left_motors[0].gearset() {
             Ok(Gearset::Blue) => 600.0,
@@ -138,6 +146,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         Self {
             left_motors,
             right_motors,
+            parallel_wheel,
+            perpendicular_wheel,
             config,
             imu,
             controller,
@@ -168,9 +178,11 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
     fn update_odometry(&mut self) {
         let left_pos = self.left_motors[0].position().unwrap_or_default();
         let right_pos = self.right_motors[0].position().unwrap_or_default();
+        let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
+        let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
         let imu_heading_rad = self.imu.rotation().unwrap_or_default().to_radians();
         self.odometry
-            .update(left_pos, right_pos, imu_heading_rad);
+            .update(left_pos, right_pos, Some(parallel_pos), Some(perpendicular_pos), imu_heading_rad);
     }
 
     fn check_stall(&mut self) -> bool {
@@ -201,11 +213,10 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             if self.stall_timer.is_none() {
                 self.stall_timer = Some(Instant::now());
             }
-            if let Some(timer) = self.stall_timer {
-                if timer.elapsed() >= self.config.stall_time {
+            if let Some(timer) = self.stall_timer
+                && timer.elapsed() >= self.config.stall_time {
                     return true;
                 }
-            }
         } else {
             self.stall_timer = None;
         }
@@ -355,9 +366,9 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let b = &profile_points[i].point;
             let c = &profile_points[i+1].point;
 
-            let ab_len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
-            let bc_len = ((c.x - b.x).powi(2) + (c.y - b.y).powi(2)).sqrt();
-            let ac_len = ((c.x - a.x).powi(2) + (c.y - a.y).powi(2)).sqrt();
+            let ab_len = (b.x - a.x).hypot(b.y - a.y);
+            let bc_len = (c.x - b.x).hypot(c.y - b.y);
+            let ac_len = (c.x - a.x).hypot(c.y - a.y);
 
             let area = 0.5 * ((a.x * (b.y - c.y)) + (b.x * (c.y - a.y)) + (c.x * (a.y - b.y)));
             let denom = ab_len * bc_len * ac_len;
@@ -516,12 +527,11 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                 if small_timer.is_none() {
                     small_timer = Some(Instant::now());
                 }
-                if let Some(t) = small_timer {
-                    if t.elapsed() >= self.config.small_drive_settle_time {
+                if let Some(t) = small_timer
+                    && t.elapsed() >= self.config.small_drive_settle_time {
                         println!("ramsete: done (small error)");
                         break;
                     }
-                }
             } else {
                 small_timer = None;
                 if dist_err <= self.config.big_drive_exit_error {
@@ -529,24 +539,22 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                     if big_timer.is_none() {
                         big_timer = Some(Instant::now());
                     }
-                    if let Some(t) = big_timer {
-                        if t.elapsed() >= self.config.big_drive_settle_time {
+                    if let Some(t) = big_timer
+                        && t.elapsed() >= self.config.big_drive_settle_time {
                             println!("ramsete: done (big error)");
                             break;
                         }
-                    }
                 } else {
                     big_timer = None;
                     if avg_velocity <= self.config.stall_velocity_threshold {
                         if vel_timer.is_none() {
                             vel_timer = Some(Instant::now());
                         }
-                        if let Some(t) = vel_timer {
-                            if t.elapsed() >= self.config.stall_time {
+                        if let Some(t) = vel_timer
+                            && t.elapsed() >= self.config.stall_time {
                                 println!("ramsete: done (low velocity detected)");
                                 break;
                             }
-                        }
                     } else {
                         vel_timer = None;
                     }
@@ -717,24 +725,22 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                 if ts.is_none() {
                     ts = Some(Instant::now());
                 }
-                if let Some(t) = ts {
-                    if t.elapsed() >= self.config.small_turn_settle_time {
+                if let Some(t) = ts
+                    && t.elapsed() >= self.config.small_turn_settle_time {
                         println!("turn_to_angle: done (small error)");
                         break;
                     }
-                }
             } else {
                 ts = None;
                 if e2 <= self.config.big_turn_exit_error {
                     if tb.is_none() {
                         tb = Some(Instant::now());
                     }
-                    if let Some(t) = tb {
-                        if t.elapsed() >= self.config.big_turn_settle_time {
+                    if let Some(t) = tb
+                        && t.elapsed() >= self.config.big_turn_settle_time {
                             println!("turn_to_angle: done (big error)");
                             break;
                         }
-                    }
                 } else {
                     tb = None;
                 }
@@ -789,24 +795,22 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                 if small_error_timer.is_none() {
                     small_error_timer = Some(Instant::now());
                 }
-                if let Some(t) = small_error_timer {
-                    if t.elapsed() >= self.config.small_drive_settle_time {
+                if let Some(t) = small_error_timer
+                    && t.elapsed() >= self.config.small_drive_settle_time {
                         println!("drive_straight: done (small error)");
                         break;
                     }
-                }
             } else {
                 small_error_timer = None;
                 if err.abs() <= self.config.big_drive_exit_error {
                     if big_error_timer.is_none() {
                         big_error_timer = Some(Instant::now());
                     }
-                    if let Some(t) = big_error_timer {
-                        if t.elapsed() >= self.config.big_drive_settle_time {
+                    if let Some(t) = big_error_timer
+                        && t.elapsed() >= self.config.big_drive_settle_time {
                             println!("drive_straight: done (big error)");
                             break;
                         }
-                    }
                 } else {
                     big_error_timer = None;
                 }

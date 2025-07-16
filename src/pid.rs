@@ -36,11 +36,10 @@ impl Pid {
             return self.kp * error + self.ki * self.integral;
         }
 
-        if let Some(prev_e) = self.prev_error {
-            if prev_e * error < 0.0 {
+        if let Some(prev_e) = self.prev_error
+            && prev_e * error < 0.0 {
                 self.integral = 0.0;
             }
-        }
 
         self.integral *= self.integral_decay;
         self.integral += error * dt;

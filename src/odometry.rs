@@ -25,7 +25,7 @@ impl Pos2Like for Pose {
         self.y
     }
     fn distance(&self, other: &Self) -> f64 {
-        ((self.x - other.x).powi(2) + (self.y - other.y).powi(2)).sqrt()
+        (self.x - other.x).hypot(self.y - other.y)
     }
     fn lerp (&self, other: &Self, t: f64) -> Self {
         Self {
@@ -35,13 +35,23 @@ impl Pos2Like for Pose {
         }
     }
 }
+#[derive(Debug, Clone, Copy)]
+pub struct TrackingWheelConfig {
+    pub parallel_offset: f64,
+    pub perpendicular_offset: f64,
+    pub wheel_diameter: f64,
+}
+
 pub struct Odometry {
     pose: Pose,
     prev_lrevs: f64,
     prev_rrevs: f64,
+    prev_parallel_revs: Option<f64>,
+    prev_perpendicular_revs: Option<f64>,
     wheel_circumference: f64,
     track_width: f64,
     ext_gear_ratio: f64,
+    tracking_wheels: Option<TrackingWheelConfig>,
 }
 
 impl Odometry {
@@ -50,14 +60,18 @@ impl Odometry {
         wheel_diameter: f64,
         track_width: f64,
         ext_gear_ratio: f64,
+        tracking_wheels: Option<TrackingWheelConfig>,
     ) -> Self {
         Self {
             pose: initial_pose,
             prev_lrevs: 0.0,
             prev_rrevs: 0.0,
+            prev_parallel_revs: None,
+            prev_perpendicular_revs: None,
             wheel_circumference: wheel_diameter * PI,
             track_width,
             ext_gear_ratio,
+            tracking_wheels,
         }
     }
 
@@ -65,8 +79,35 @@ impl Odometry {
         &mut self,
         left_revs: Position,
         right_revs: Position,
+        parallel_revs: Option<Position>,
+        perpendicular_revs: Option<Position>,
         imu_heading_rad: f64,
     ) {
+        if let (Some(tw), Some(par), Some(perp)) =
+            (&self.tracking_wheels, parallel_revs, perpendicular_revs)
+        {
+            let p = par.as_revolutions();
+            let q = perp.as_revolutions();
+
+            let dp = (p - self.prev_parallel_revs.unwrap_or(p)) * tw.wheel_diameter * PI;
+            let ds = (q - self.prev_perpendicular_revs.unwrap_or(q)) * tw.wheel_diameter * PI;
+
+            self.prev_parallel_revs = Some(p);
+            self.prev_perpendicular_revs = Some(q);
+
+            let theta = self.normalize_angle(imu_heading_rad);
+            let dtheta = self.normalize_angle(theta - self.pose.heading);
+            // compensate rotation-induced wheel travel
+            let dx_robot = dp - dtheta * tw.perpendicular_offset;
+            let dy_robot = ds + dtheta * tw.parallel_offset;
+
+            self.pose.x += dx_robot * self.pose.heading.cos()
+                - dy_robot * self.pose.heading.sin();
+            self.pose.y += dx_robot * self.pose.heading.sin()
+                + dy_robot * self.pose.heading.cos();
+            self.pose.heading = theta;
+            return;
+        }
         let lrevs = left_revs.as_revolutions();
         let rrevs = right_revs.as_revolutions();
 
@@ -79,10 +120,8 @@ impl Odometry {
         let delta_wheel_rrevs = delta_rrevs / self.ext_gear_ratio;
         let delta_ldist = delta_wheel_lrevs * self.wheel_circumference;
         let delta_rdist = delta_wheel_rrevs * self.wheel_circumference;
-        // average distance traveled
         let avg_fwd_dist = (delta_ldist + delta_rdist) / 2.0;
 
-        // encoder-based delta heading
         let delta_heading_enc = (delta_rdist - delta_ldist) / self.track_width;
         let enc_heading = self.pose.heading + delta_heading_enc;
         // also use imu heading

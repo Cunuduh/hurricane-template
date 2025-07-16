@@ -10,7 +10,7 @@ use vexide::{devices::smart::imu::InertialSensor, prelude::*};
 
 use crate::{
     control::{Chassis, ChassisConfig},
-    odometry::Pose,
+    odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
     plan::Action,
 };
@@ -35,17 +35,24 @@ pub struct Robot {
 impl Robot {
     async fn new(peripherals: Peripherals) -> Self {
         let left_motors = [
-            Motor::new(peripherals.port_6, Gearset::Blue, Direction::Forward),
-            Motor::new(peripherals.port_5, Gearset::Blue, Direction::Reverse),
-            Motor::new(peripherals.port_4, Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.port_1, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.port_3, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.port_5, Gearset::Blue, Direction::Forward),
         ];
         let right_motors = [
-            Motor::new(peripherals.port_3, Gearset::Blue, Direction::Reverse),
-            Motor::new(peripherals.port_2, Gearset::Blue, Direction::Forward),
-            Motor::new(peripherals.port_1, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.port_2, Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.port_4, Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.port_6, Gearset::Blue, Direction::Reverse),
         ];
 
         let imu = InertialSensor::new(peripherals.port_7);
+        let parallel_wheel = RotationSensor::new(peripherals.port_8, Direction::Forward);
+        let perpendicular_wheel = RotationSensor::new(peripherals.port_9, Direction::Forward);
+        let tw_config = TrackingWheelConfig {
+            parallel_offset: -6.5,
+            perpendicular_offset: -6.5,
+            wheel_diameter: 2.0,
+        };
 
         let drive_pid = Pid::new(6.0, 0.0, 0.5, 0.0, 0.0);
         let turn_pid = Pid::new(6.0, 0.0, 0.01, 0.0, 0.0);
@@ -80,12 +87,15 @@ impl Robot {
             stall_time: Duration::from_millis(400),
 
             accel_t: 0.5,
+            tw_config: Some(tw_config),
         };
 
         let chassis = Chassis::new(
             peripherals.primary_controller,
             left_motors,
             right_motors,
+            parallel_wheel,
+            perpendicular_wheel,
             imu,
             config,
         )
