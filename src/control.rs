@@ -9,7 +9,7 @@ use vexide::{
 
 use crate::odometry::{Odometry, Pose};
 use crate::pid::Pid;
-use crate::utils::path::{calculate_interpolated_path_size, interpolate_catmull_rom};
+use crate::utils::path::{interpolate_catmull_rom, interpolate_linear};
 use crate::triggers::TriggerManager;
 
 struct Segment {
@@ -34,7 +34,7 @@ pub trait Pos2Like {
     }
     fn lerp(&self, other: &Self, t: f64) -> Self;
 }
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 struct ProfilePoint {
     point: Pose,
     distance: f64,
@@ -43,10 +43,18 @@ struct ProfilePoint {
     is_reversed: bool,
     max_speed: f64,
 }
-#[derive(Default, Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug)]
 pub struct PoseSettings {
     pub is_reversed: bool,
     pub max_voltage: f64,
+}
+impl Default for PoseSettings {
+    fn default() -> Self {
+        Self {
+            is_reversed: false,
+            max_voltage: 12.0,
+        }
+    }
 }
 pub struct ChassisConfig {
     pub initial_pose: Pose,
@@ -284,22 +292,14 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         points: &[(Pose, PoseSettings)],
     ) {
         for (i, (pose, settings)) in points.iter().enumerate() {
-            self.drive_to_point(pose.x, pose.y, settings.max_voltage, settings.is_reversed)
+            self.drive_to_point(pose.x, pose.y, *settings)
                 .await;
             self.triggers.check_index(i);
         }
     }
 
-// motion profile taken from https://www.chiefdelphi.com/t/paper-implementation-of-the-adaptive-pure-pursuit-controller/166552
-    fn init_profile<const N: usize, const S: usize>(
-        &self,
-        raw: &[(Pose, PoseSettings); N],
-    ) -> Profile
-    where
-        [(); calculate_interpolated_path_size::<N, S>()]: Sized,
-    {
-        let mut path = interpolate_catmull_rom::<N, S>(raw);
-        let mut path_points = path.iter_mut().map(|p| p.0).collect::<Vec<_>>();
+    fn create_motion_profile(&self, interpolated_path: Vec<(Pose, PoseSettings)>, raw_waypoints: &[(Pose, PoseSettings)]) -> Profile {
+        let mut path_points = interpolated_path.iter().map(|p| p.0).collect::<Vec<_>>();
         let m = path_points.len();
         let mut profile_points = Vec::with_capacity(m);
 
@@ -321,22 +321,35 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             }
         }
         
-        // compute cumulative distance
         let mut cum_d = 0.0;
-        profile_points.push(ProfilePoint { point: path_points[0], distance: 0.0, curvature: 0.0, velocity: 0.0, is_reversed: raw[0].1.is_reversed, max_speed: raw[0].1.max_voltage });
+        profile_points.push(ProfilePoint { 
+            point: path_points[0], 
+            distance: 0.0, 
+            curvature: 0.0, 
+            velocity: 0.0, 
+            is_reversed: raw_waypoints[0].1.is_reversed, 
+            max_speed: raw_waypoints[0].1.max_voltage 
+        });
+        
         for i in 1..m {
             let d = (path_points[i].x - path_points[i-1].x).hypot(path_points[i].y - path_points[i-1].y);
             cum_d += d;
-            // assign properties to interpolated points based on original waypoints
-            let raw_idx_for_props = ((i * (N - 1)) / (m - 1)).min(N - 1);
-            profile_points.push(ProfilePoint { point: path_points[i], distance: cum_d, curvature: 0.0, velocity: 0.0, is_reversed: raw[raw_idx_for_props].1.is_reversed, max_speed: raw[raw_idx_for_props].1.max_voltage });
+            let raw_idx_for_props = ((i * (raw_waypoints.len() - 1)) / (m - 1)).min(raw_waypoints.len() - 1);
+            profile_points.push(ProfilePoint { 
+                point: path_points[i], 
+                distance: cum_d, 
+                curvature: 0.0, 
+                velocity: 0.0, 
+                is_reversed: raw_waypoints[raw_idx_for_props].1.is_reversed, 
+                max_speed: raw_waypoints[raw_idx_for_props].1.max_voltage 
+            });
         }
-        // flip headings if point segment is reversed
+        
         profile_points.iter_mut().filter(|p| p.is_reversed).for_each(|p| {
             p.point.heading += PI;
             p.point.heading = self.normalize_angle(p.point.heading);
         });
-        // calculate curvature of three adjacent points with menger curvature formula
+        
         for i in 1..(m-1) {
             let a = &profile_points[i-1].point;
             let b = &profile_points[i].point;
@@ -345,10 +358,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let ab_len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
             let bc_len = ((c.x - b.x).powi(2) + (c.y - b.y).powi(2)).sqrt();
             let ac_len = ((c.x - a.x).powi(2) + (c.y - a.y).powi(2)).sqrt();
-            // use the shoelace formula to calculate the area of the triangle
 
             let area = 0.5 * ((a.x * (b.y - c.y)) + (b.x * (c.y - a.y)) + (c.x * (a.y - b.y)));
-            // curvature = 4A / (|ab| * |bc| * |ac|)
             let denom = ab_len * bc_len * ac_len;
             if denom > 1e-9 {
                 profile_points[i].curvature = 4.0 * area.abs() / denom;
@@ -356,35 +367,29 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                 profile_points[i].curvature = 0.0;
             }
         }
-        // calculate max velocity based on wheel diameter, gear ratio, cartridge rpm
+        
         let w_circ = self.config.wheel_diameter * PI;
         let rpm = self.motor_free_rpm / self.config.ext_gear_ratio;
         let max_v = (rpm / 60.0) * w_circ;
-
-        // a = v/t
         let max_a = max_v / self.config.accel_t;
-        // k controls velocity around curves
-        // lower k = more careful turning
         let k = 2.0;
-        // set velocity limits for each point
+        
         for p in profile_points.iter_mut() {
             let point_max_v = (p.max_speed / self.config.max_volts) * max_v;
             let mut v = point_max_v;
-            // limit velocity based on curvature
             if p.curvature > 1e-6 {
                 let v_k_curv_limit = k / p.curvature;
                 v = v.min(v_k_curv_limit);
             }
             p.velocity = v;
         }
-        // forward pass
+        
         for i in 0..(m - 1) {
             let d = profile_points[i+1].distance - profile_points[i].distance;
             if d < 1e-9 {
                 profile_points[i+1].velocity = profile_points[i+1].velocity.min(profile_points[i].velocity);
                 continue;
             }
-            // kinematic equation vf^2 = vi^2 + 2 * a * d
             let vf = profile_points[i].velocity.powi(2) + 2.0 * max_a * d;
             if vf >= 0.0 {
                 profile_points[i+1].velocity = profile_points[i+1].velocity.min(vf.sqrt());
@@ -394,7 +399,7 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         }
         profile_points[0].velocity = 0.0;
         profile_points[m-1].velocity = 0.0;
-        // reverse pass
+        
         for i in (0..(m-1)).rev() {
             let d = profile_points[i+1].distance - profile_points[i].distance;
             if d < 1e-9 {
@@ -409,18 +414,6 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             }
         }
 
-        // add a proportional ramp over the first segment (first S interpolated points)
-        // we do this to avoid moving too fast at the start which was wack and i still don't know why it did that
-        // let ramp_end = S.min(m - 1);
-        // profile_points
-        //     .iter_mut()
-        //     .take(ramp_end + 1)
-        //     .enumerate()
-        //     .for_each(|(i, pt)| {
-        //         let scale = (i as f64) / (ramp_end as f64);
-        //         pt.velocity *= scale;
-        //     });
-
         let mut times = Vec::with_capacity(m);
         times.push(0.0);
         for i in 1..m {
@@ -430,22 +423,33 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         }
         let total_time = *times.last().unwrap_or(&0.0);
 
-
         Profile { profile_points, times, total_time }
     }
-    pub async fn drive_ramsete<const N_WAYPOINTS: usize, const STEPS: usize>(
+    pub async fn drive_ramsete_catmull_rom(
         &mut self,
-        path_waypoints: &[(Pose, PoseSettings); N_WAYPOINTS],
+        path_waypoints: &[(Pose, PoseSettings)],
+        steps: usize,
         b: f64,
         zeta: f64,
-    ) where
-        [(); calculate_interpolated_path_size::<N_WAYPOINTS, STEPS>()]: Sized,
-    {
-        let initialized_profile = self.init_profile::<N_WAYPOINTS, STEPS>(path_waypoints);
+    ) {
+        let interpolated_path = interpolate_catmull_rom(path_waypoints, steps);
+        let initialized_profile = self.create_motion_profile(interpolated_path, path_waypoints);
         let profile = initialized_profile.profile_points;
         let times = initialized_profile.times;
         let total_time = initialized_profile.total_time;
         
+        self.execute_ramsete_profile(profile, times, total_time, b, zeta, steps).await;
+    }
+
+    async fn execute_ramsete_profile(
+        &mut self,
+        profile: Vec<ProfilePoint>,
+        times: Vec<f64>,
+        total_time: f64,
+        b: f64,
+        zeta: f64,
+        steps: usize,
+    ) {
         let m = profile.len();
         if m < 2 {
             println!("ramsete: too few points");
@@ -471,9 +475,15 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             });
         }
 
+        let wp_count = if steps > 0 { (m - 1) / steps + 1 } else { 1 };
+        let mut last_wp = None;
+
         let mut last_time = Instant::now();
         let start_time = last_time;
         let mut seg_i = 0;
+        let mut small_timer: Option<Instant> = None;
+        let mut big_timer: Option<Instant> = None;
+        let mut vel_timer: Option<Instant> = None;
 
         loop {
             let now = Instant::now();
@@ -485,15 +495,66 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             last_time = now;
             let elapsed = now.duration_since(start_time).as_secs_f64();
             self.update_odometry();
+            
+            let mut total_velocity = 0.0;
+            let mut num_motors = 0;
+            for motor in self.left_motors.iter().chain(self.right_motors.iter()) {
+                total_velocity += motor.velocity().unwrap_or_default().abs();
+                num_motors += 1;
+            }
+            let avg_velocity = if num_motors > 0 { total_velocity / num_motors as f64 } else { 0.0 };
+            
             let current = self.odometry.pose();
             let goal = profile.last().unwrap().point;
             let dx_end = goal.x - current.x;
             let dy_end = goal.y - current.y;
-            if (dx_end.hypot(dy_end)).abs() < self.config.small_drive_exit_error {
-                break;
+            let dist_err = dx_end.hypot(dy_end);
+            
+            if dist_err <= self.config.small_drive_exit_error {
+                big_timer = None;
+                vel_timer = None;
+                if small_timer.is_none() {
+                    small_timer = Some(Instant::now());
+                }
+                if let Some(t) = small_timer {
+                    if t.elapsed() >= self.config.small_drive_settle_time {
+                        println!("ramsete: done (small error)");
+                        break;
+                    }
+                }
+            } else {
+                small_timer = None;
+                if dist_err <= self.config.big_drive_exit_error {
+                    vel_timer = None;
+                    if big_timer.is_none() {
+                        big_timer = Some(Instant::now());
+                    }
+                    if let Some(t) = big_timer {
+                        if t.elapsed() >= self.config.big_drive_settle_time {
+                            println!("ramsete: done (big error)");
+                            break;
+                        }
+                    }
+                } else {
+                    big_timer = None;
+                    if avg_velocity <= self.config.stall_velocity_threshold {
+                        if vel_timer.is_none() {
+                            vel_timer = Some(Instant::now());
+                        }
+                        if let Some(t) = vel_timer {
+                            if t.elapsed() >= self.config.stall_time {
+                                println!("ramsete: done (low velocity detected)");
+                                break;
+                            }
+                        }
+                    } else {
+                        vel_timer = None;
+                    }
+                }
             }
             
             if elapsed >= total_time {
+                println!("ramsete: done (timeout)");
                 break;
             }
 
@@ -502,7 +563,18 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             }
             let i = seg_i;
 
-            self.triggers.check_index(i);
+            if wp_count > 1 {
+                let wp_idx = if i >= (wp_count - 1) * steps {
+                    wp_count - 1
+                } else {
+                    i / steps
+                };
+                
+                if Some(wp_idx) != last_wp && wp_idx > 0 {
+                    self.triggers.check_index(wp_idx);
+                    last_wp = Some(wp_idx);
+                }
+            }
             let seg_data = &segments[i];
 
             let p0 = &profile[i].point;
@@ -542,23 +614,17 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let e_y = -dx * pose.heading.sin() + dy * pose.heading.cos();
             let e_theta = self.normalize_angle(heading_d - pose.heading);
 
-            // RAMSETE gains
             let k = 2.0 * zeta * (w_d * w_d + b * v_d * v_d).sqrt();
-            // linear velocity
             let v = v_d * e_theta.cos() + k * e_x;
-            // angular velocity
             let w = if e_theta.abs() < 1e-9 {
                 w_d + k * e_theta
             } else {
                 w_d + k * e_theta + (b * v_d * e_theta.sin() * e_y) / e_theta
             };
             
-            // convert desired chassis velocities into wheel linear velocities
             let wheel_vel_l = v + w * self.config.track_width / 2.0;
             let wheel_vel_r = v - w * self.config.track_width / 2.0;
-            // compute max linear velocity in inches/sec
             let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0) * (self.config.wheel_diameter * PI);
-            // scale wheel velocities to voltages
             let vl = (wheel_vel_l / max_linear_vel * self.config.max_volts).clamp(-self.config.max_volts, self.config.max_volts);
             let vr = (wheel_vel_r / max_linear_vel * self.config.max_volts).clamp(-self.config.max_volts, self.config.max_volts);
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
@@ -568,25 +634,25 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let _ = m.brake(BrakeMode::Hold);
         }
     }
+
     pub async fn drive_to_point(
         &mut self,
         target_x: f64,
         target_y: f64,
-        max_voltage: f64,
-        is_reversed: bool,
+        settings: PoseSettings,
     ) {
         self.update_odometry();
         let pose_before_turn = self.odometry.pose();
         let angle_to_target =
             (target_y - pose_before_turn.y).atan2(target_x - pose_before_turn.x);
 
-        let target_orientation = if is_reversed {
+        let target_orientation = if settings.is_reversed {
             self.normalize_angle(angle_to_target + PI)
         } else {
             angle_to_target
         };
 
-        self.turn_to_angle(target_orientation.to_degrees(), max_voltage)
+        self.turn_to_angle(target_orientation.to_degrees(), settings.max_voltage)
             .await;
 
         self.update_odometry();
@@ -595,14 +661,14 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         let dy = target_y - pose_after_turn.y;
         let dist_to_target = dx.hypot(dy);
 
-        let drive_dist = if is_reversed {
+        let drive_dist = if settings.is_reversed {
             -dist_to_target
         } else {
             dist_to_target
         };
 
         if drive_dist.abs() > 0.01 {
-            self.drive_straight(drive_dist, max_voltage)
+            self.drive_straight(drive_dist, settings.max_voltage)
                 .await;
         }
     }

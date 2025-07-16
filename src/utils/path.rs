@@ -1,19 +1,10 @@
+extern crate alloc;
+use alloc::vec;
+use alloc::vec::Vec;
 use vexide::prelude::Float;
 use crate::{control::{Pos2Like, PoseSettings}, odometry::Pose};
 
-pub const fn calculate_interpolated_path_size<const N: usize, const STEPS: usize>() -> usize {
-    if N == 0 {
-        0
-    } else if N == 1 {
-        1
-    } else {
-        (N - 1) * STEPS + 1
-    }
-}
-// https://en.wikipedia.org/wiki/Centripetal_Catmull-Rom_spline
-// we prefer centripetal catmull-rom for paths because it's c3 continuous
-// meaning it has continuous third derivatives (acceleration), important for smooth acceleration
-pub fn catmull_rom<T: Pos2Like + Clone>(
+fn catmull_rom<T: Pos2Like + Clone>(
     p0: &T,
     p1: &T,
     p2: &T,
@@ -50,48 +41,56 @@ pub fn catmull_rom<T: Pos2Like + Clone>(
     b1.lerp(&b2, (t_ - t1) / dt12)
 }
 
-pub fn interpolate_catmull_rom<const N: usize, const STEPS: usize>(
-    points: &[(Pose, PoseSettings); N],
-) -> [(Pose, PoseSettings); calculate_interpolated_path_size::<N, STEPS>()] {
-    let mut result = [(Pose::default(), PoseSettings::default()); calculate_interpolated_path_size::<N, STEPS>()];
-    // 0.0 = uniform catmull-rom
-    // 0.5 = centripetal catmull-rom
-    // 1.0 = chordal catmull-rom
-    // we opt for 0.5 because it works better around sharp bends, guaranteed to not cross over itself
+pub fn interpolate_catmull_rom(
+    points: &[(Pose, PoseSettings)],
+    steps: usize,
+) -> Vec<(Pose, PoseSettings)> {
     const ALPHA: f64 = 0.5;
-    
-    if N == 0 {
-        return result;
+    let n = points.len();
+    if n == 0 {
+        return Vec::new();
     }
-    if N == 1 {
-        if calculate_interpolated_path_size::<N, STEPS>() > 0 {
-             result[0] = (points[0].0, points[0].1);
-        }
-        return result;
+    if n == 1 {
+        return vec![(points[0].0, points[0].1)];
     }
-
-    let mut idx = 0;
-    for i in 0..(N - 1) {
+    let mut result = Vec::with_capacity((n - 1) * steps + 1);
+    for i in 0..(n - 1) {
         let p0 = if i == 0 { points[0].0 } else { points[i - 1].0 };
         let p1 = points[i].0;
         let p2 = points[i + 1].0;
-        let p3 = if i + 2 >= N { points[N - 1].0 } else { points[i + 2].0 };
-
-        for step in 0..STEPS {
-            let t = step as f64 / STEPS as f64;
-            if idx < calculate_interpolated_path_size::<N, STEPS>() {
-                result[idx].0 = catmull_rom(&p0, &p1, &p2, &p3, t, ALPHA);
-                result[idx].1.is_reversed = points[i].1.is_reversed;
-                result[idx].1.max_voltage = points[i].1.max_voltage;
-                idx += 1;
-            }
+        let p3 = if i + 2 >= n { points[n - 1].0 } else { points[i + 2].0 };
+        for step in 0..steps {
+            let t = step as f64 / steps as f64;
+            let pt = catmull_rom(&p0, &p1, &p2, &p3, t, ALPHA);
+            result.push((pt, points[i].1));
         }
     }
-    if idx < calculate_interpolated_path_size::<N, STEPS>() {
-        result[idx] = points[N - 1];
-    } else if N > 0 && calculate_interpolated_path_size::<N, STEPS>() > 0 && idx == 0 && STEPS == 0 {
-        result[0] = points[N-1];
-    }
+    result.push(points[n - 1]);
+    result
+}
 
+pub fn interpolate_linear(
+    points: &[(Pose, PoseSettings)],
+    steps: usize,
+) -> Vec<(Pose, PoseSettings)> {
+    let n = points.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![(points[0].0, points[0].1)];
+    }
+    
+    let mut result = Vec::with_capacity((n - 1) * steps + 1);
+    for i in 0..(n - 1) {
+        let p1 = points[i].0;
+        let p2 = points[i + 1].0;
+        for step in 0..steps {
+            let t = step as f64 / steps as f64;
+            let pt = p1.lerp(&p2, t);
+            result.push((pt, points[i].1));
+        }
+    }
+    result.push(points[n - 1]);
     result
 }
