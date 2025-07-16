@@ -1,4 +1,5 @@
 extern crate alloc;
+use alloc::string::String;
 use alloc::{
     sync::Arc,
     vec::Vec,
@@ -6,6 +7,7 @@ use alloc::{
 };
 use crate::odometry::Pose;
 use crate::control::PoseSettings;
+use crate::triggers::TriggerCondition;
 use crate::Robot;
 pub enum Action {
     DriveCurve {
@@ -18,9 +20,9 @@ pub enum Action {
     DriveStraight(f64, PoseSettings),
     TurnToPoint(Pose, PoseSettings),
     TurnToAngle(f64, PoseSettings),
-    TriggerOnIndex(usize, Box<dyn FnMut() + Send + Sync>),
-    TriggerOnDistance(f64, Box<dyn FnMut() + Send + Sync>),
-    TriggerOnAngle(f64, Box<dyn FnMut() + Send + Sync>),
+    TriggerOnIndex(usize, String),
+    TriggerOnDistance(f64, String),
+    TriggerOnAngle(f64, String),
 }
 
 impl Robot {
@@ -45,14 +47,14 @@ impl Robot {
                 Action::TurnToAngle(angle, settings) => {
                     self.chassis.turn_to_angle(angle, settings.max_voltage).await;
                 }
-                Action::TriggerOnIndex(index, trigger) => {
-                    self.chassis.triggers.add_index_trigger(index, trigger);
+                Action::TriggerOnIndex(index, name) => {
+                    self.chassis.triggers.arm(TriggerCondition::Index(index), name);
                 }
-                Action::TriggerOnDistance(distance, trigger) => {
-                    self.chassis.triggers.add_distance_trigger(distance, trigger);
+                Action::TriggerOnDistance(distance, name) => {
+                    self.chassis.triggers.arm(TriggerCondition::Distance(distance), name);
                 }
-                Action::TriggerOnAngle(angle, trigger) => {
-                    self.chassis.triggers.add_angle_trigger(angle, trigger);
+                Action::TriggerOnAngle(angle, name) => {
+                    self.chassis.triggers.arm(TriggerCondition::Angle(angle), name);
                 }
             }
         }

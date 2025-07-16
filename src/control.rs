@@ -1,6 +1,6 @@
 use core::{f64::consts::PI, time::Duration};
 extern crate alloc;
-use alloc::vec::Vec;
+use alloc::{boxed::Box, collections::btree_map::BTreeMap, string::String, vec::Vec};
 use vexide::{
     devices::{controller::Controller, smart::imu::InertialSensor},
     prelude::*,
@@ -113,6 +113,7 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         mut perpendicular_wheel: RotationSensor,
         mut imu: InertialSensor,
         config: ChassisConfig,
+        triggers: BTreeMap<String, Box<dyn FnMut()>>,
     ) -> Self {
         let _ = imu.calibrate().await;
         
@@ -158,7 +159,7 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             prev_throttle: 0.0,
             quick_stop_accumulator: 0.0,
             neg_inertia_accumulator: 0.0,
-            triggers: TriggerManager::new(),
+            triggers: TriggerManager::new(triggers),
         }
     }
     fn normalize_angle(&self, mut angle: f64) -> f64 {
