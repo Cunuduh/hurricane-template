@@ -1,9 +1,7 @@
 extern crate alloc;
-use alloc::string::String;
 use alloc::{
     sync::Arc,
     vec::Vec,
-    boxed::Box,
 };
 use crate::odometry::Pose;
 use crate::control::PoseSettings;
@@ -20,9 +18,9 @@ pub enum Action {
     DriveStraight(f64, PoseSettings),
     TurnToPoint(Pose, PoseSettings),
     TurnToAngle(f64, PoseSettings),
-    TriggerOnIndex(usize, String),
-    TriggerOnDistance(f64, String),
-    TriggerOnAngle(f64, String),
+    TriggerOnIndex(usize, &'static str),
+    TriggerOnDistance(f64, &'static str),
+    TriggerOnAngle(f64, &'static str),
 }
 
 impl Robot {

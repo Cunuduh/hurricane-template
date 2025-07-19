@@ -1,6 +1,6 @@
 use core::{f64::consts::PI, time::Duration};
 extern crate alloc;
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, string::String, vec::Vec};
+use alloc::vec::Vec;
 use vexide::{
     devices::{controller::Controller, smart::imu::InertialSensor},
     prelude::*,
@@ -113,7 +113,7 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         mut perpendicular_wheel: RotationSensor,
         mut imu: InertialSensor,
         config: ChassisConfig,
-        triggers: BTreeMap<String, Box<dyn FnMut()>>,
+        triggers: &'static [(&'static str, fn())],
     ) -> Self {
         let _ = imu.calibrate().await;
         

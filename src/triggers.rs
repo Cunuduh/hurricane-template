@@ -1,6 +1,5 @@
 extern crate alloc;
-use alloc::{boxed::Box, collections::BTreeMap, format, string::String, vec::Vec};
-
+use alloc::vec::Vec;
 
 pub enum TriggerCondition {
     Distance(f64),
@@ -10,30 +9,27 @@ pub enum TriggerCondition {
 
 struct Trigger {
     cond: TriggerCondition,
-    callback: Box<dyn FnMut()>,
+    callback: fn(),
 }
 
 pub struct TriggerManager {
-    triggers: BTreeMap<String, Box<dyn FnMut()>>,
+    triggers: &'static [(&'static str, fn())],
     armed_triggers: Vec<Trigger>,
 }
 
 impl TriggerManager {
-    pub fn new(triggers: BTreeMap<String, Box<dyn FnMut()>>) -> Self {
+    pub fn new(triggers: &'static [(&'static str, fn())]) -> Self {
         TriggerManager { triggers, armed_triggers: Vec::new() }
     }
-    pub fn arm<S: AsRef<str>>(&mut self, condition: TriggerCondition, name: S) {
-        let name_ref = name.as_ref();
-        let callback = self.triggers.remove(name_ref)
-            .unwrap_or_else(|| panic!("Trigger '{}' not found", name_ref));
-        self.armed_triggers.push(Trigger {
-            cond: condition,
-            callback,
-        });
+    pub fn arm(&mut self, condition: TriggerCondition, name: &str) {
+        let callback = self.triggers.iter()
+            .find_map(|(n, f)| (*n == name).then_some(*f))
+            .unwrap_or_else(|| panic!("Trigger '{}' not found", name));
+        self.armed_triggers.push(Trigger { cond: condition, callback });
     }
 
     pub fn check(&mut self, mut matcher: impl FnMut(&TriggerCondition) -> bool) {
-        self.armed_triggers.retain_mut(|trigger| {
+        self.armed_triggers.retain(|trigger| {
             if matcher(&trigger.cond) {
                 (trigger.callback)();
                 false

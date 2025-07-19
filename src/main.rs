@@ -2,7 +2,7 @@
 #![no_std]
 #![feature(generic_const_exprs)]
 extern crate alloc;
-use alloc::{boxed::Box, collections::btree_map::BTreeMap, string::{String, ToString}, sync::Arc, vec};
+use alloc::{sync::Arc, vec};
 use core::time::Duration;
 
 use control::PoseSettings;
@@ -89,13 +89,11 @@ impl Robot {
             accel_t: 0.5,
             tw_config: Some(tw_config),
         };
-        let triggers: BTreeMap<String, Box<dyn FnMut()>> = [
-            ("do something".to_string(), Box::new(|| {
+        let triggers: &'static [(&'static str, fn())] = &[
+            ("do something", || {
                 println!("Triggered: do something");
-            }) as Box<dyn FnMut()>),
-        ]
-        .into_iter()
-        .collect();
+            }),
+        ];
         let chassis = Chassis::new(
             peripherals.primary_controller,
             left_motors,
@@ -170,7 +168,7 @@ impl Compete for Robot {
             },
             Action::TriggerOnDistance(
                 24.0,
-                "do something".to_string()
+                "do something"
             ),
         ];
         self.run_plan(plan).await;
