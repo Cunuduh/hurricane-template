@@ -35,13 +35,13 @@ pub struct Robot {
 impl Robot {
     async fn new(peripherals: Peripherals) -> Self {
         let left_motors = [
-            Motor::new(peripherals.port_1, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.port_1, Gearset::Blue, Direction::Reverse),
             Motor::new(peripherals.port_3, Gearset::Blue, Direction::Forward),
-            Motor::new(peripherals.port_5, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.port_5, Gearset::Blue, Direction::Reverse),
         ];
         let right_motors = [
             Motor::new(peripherals.port_2, Gearset::Blue, Direction::Reverse),
-            Motor::new(peripherals.port_4, Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.port_4, Gearset::Blue, Direction::Forward),
             Motor::new(peripherals.port_6, Gearset::Blue, Direction::Reverse),
         ];
 

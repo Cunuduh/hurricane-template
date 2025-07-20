@@ -42,6 +42,6 @@ cargo install cargo-v5
    ```
    cargo v5 upload
    ```
-4. Wait for the upload to finish. The robot will be ready to run the new code in slot 2, named "Hurricanes". If the upload fails while plugged into the controller, try unplugging and replugging the USB cable. If that doesn't work, plug the robot brain directly into your computer and try again.
+4. Wait for the upload to finish. The robot will be ready to run the new code in slot 1, named "Hurricanes". If the upload fails while plugged into the controller, try unplugging and replugging the USB cable. If that doesn't work, plug the robot brain directly into your computer and try again.
 
 If you see any errors unrelated to uploading the code, let me know!
