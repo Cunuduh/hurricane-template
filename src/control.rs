@@ -250,8 +250,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
     pub fn cheesy_control(&mut self) {
         self.update_odometry();
         let c_state = self.controller.state().unwrap_or_default();
-        let throttle = c_state.right_stick.x();
-        let turn = c_state.left_stick.y();
+        let throttle = c_state.left_stick.y();
+        let turn = c_state.right_stick.x();
         // taken from BLRS repo
         const DRIVE_DEADBAND: f64 = 0.05;
         const DRIVE_SLEW: f64 = 0.02;
