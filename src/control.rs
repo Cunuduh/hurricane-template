@@ -9,7 +9,7 @@ use vexide::{
 
 use crate::odometry::{Odometry, Pose, TrackingWheelConfig};
 use crate::pid::Pid;
-use crate::utils::path::{interpolate_catmull_rom, interpolate_linear};
+use crate::utils::path::interpolate_catmull_rom;
 use crate::triggers::TriggerManager;
 
 struct Segment {
@@ -309,9 +309,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             self.triggers.check_index(i);
         }
     }
-
     fn create_motion_profile(&self, interpolated_path: Vec<(Pose, PoseSettings)>, raw_waypoints: &[(Pose, PoseSettings)]) -> Profile {
-        let mut path_points = interpolated_path.iter().map(|p| p.0).collect::<Vec<_>>();
+        let path_points = interpolated_path.iter().map(|p| p.0).collect::<Vec<_>>();
         let m = path_points.len();
         let mut profile_points = Vec::with_capacity(m);
 
@@ -321,16 +320,6 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                 times: Vec::new(),
                 total_time: 0.0,
             };
-        }
-
-        for i in 0..m {
-            if i < m - 1 {
-                path_points[i].heading = (path_points[i+1].y - path_points[i].y).atan2(path_points[i+1].x - path_points[i].x);
-            } else if m > 1 {
-                path_points[i].heading = path_points[i-1].heading;
-            } else {
-                path_points[i].heading = 0.0;
-            }
         }
         
         let mut cum_d = 0.0;
@@ -361,25 +350,27 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             p.point.heading += PI;
             p.point.heading = self.normalize_angle(p.point.heading);
         });
-        
+
+        // compute curvature using finite differences of heading (more stable than triangle method from before)
         for i in 1..(m-1) {
-            let a = &profile_points[i-1].point;
-            let b = &profile_points[i].point;
-            let c = &profile_points[i+1].point;
-
-            let ab_len = (b.x - a.x).hypot(b.y - a.y);
-            let bc_len = (c.x - b.x).hypot(c.y - b.y);
-            let ac_len = (c.x - a.x).hypot(c.y - a.y);
-
-            let area = 0.5 * ((a.x * (b.y - c.y)) + (b.x * (c.y - a.y)) + (c.x * (a.y - b.y)));
-            let denom = ab_len * bc_len * ac_len;
-            if denom > 1e-9 {
-                profile_points[i].curvature = 4.0 * area.abs() / denom;
-            } else {
-                profile_points[i].curvature = 0.0;
+            let h_prev = profile_points[i-1].point.heading;
+            let h_curr = profile_points[i].point.heading;
+            let h_next = profile_points[i+1].point.heading;
+            
+            let d_prev = profile_points[i].distance - profile_points[i-1].distance;
+            let d_next = profile_points[i+1].distance - profile_points[i].distance;
+            
+            if d_prev > 1e-9 && d_next > 1e-9 {
+                let dh1 = self.normalize_angle(h_curr - h_prev);
+                let dh2 = self.normalize_angle(h_next - h_curr);
+                let avg_ds = (d_prev + d_next) / 2.0;
+                
+                // second derivative of heading approximation
+                let d2h = (dh2 / d_next - dh1 / d_prev) / avg_ds;
+                profile_points[i].curvature = d2h.abs();
             }
         }
-        
+
         let w_circ = self.config.wheel_diameter * PI;
         let rpm = self.motor_free_rpm / self.config.ext_gear_ratio;
         let max_v = (rpm / 60.0) * w_circ;
@@ -420,9 +411,9 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             }
             let vf_old = profile_points[i+1].velocity.powi(2) + 2.0 * max_a * d;
             if vf_old >= 0.0 {
-                 profile_points[i].velocity = profile_points[i].velocity.min(vf_old.sqrt());
+                profile_points[i].velocity = profile_points[i].velocity.min(vf_old.sqrt());
             } else {
-                 profile_points[i].velocity = profile_points[i].velocity.min(0.0);
+                profile_points[i].velocity = profile_points[i].velocity.min(0.0);
             }
         }
 
@@ -753,6 +744,55 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         }
 
         for m in self.left_motors.iter_mut().chain(self.right_motors.iter_mut()) { let _ = m.brake(BrakeMode::Hold); }
+    }
+
+    pub async fn calibrate_tracking_wheels(&mut self) {
+        println!("starting tracking wheel offset calibration...");
+
+        const ITERATIONS: usize = 10;
+
+        let mut parallel_offset_sum = 0.0;
+        let mut perpendicular_offset_sum = 0.0;
+
+        self.odometry.reset(Pose::default());
+        let _ = self.imu.reset_heading();
+
+        for i in 0..ITERATIONS {
+            let _ = self.imu.reset_heading();
+            let _ = self.parallel_wheel.reset_position();
+            let _ = self.perpendicular_wheel.reset_position();
+
+            let target_deg = if i.is_multiple_of(2) { 90.0 } else { 270.0 };
+
+            self.turn_to_angle(target_deg, 6.0).await;
+            sleep(Duration::from_millis(250)).await;
+
+            let imu_start = 0.0;
+            let imu_end = self.imu.rotation().unwrap_or_default().to_radians();
+            let t_delta = self.normalize_angle(imu_end - imu_start);
+
+            let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
+            let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
+            
+            let parallel_delta = parallel_pos.as_revolutions();
+            let perpendicular_delta = perpendicular_pos.as_revolutions();
+
+            let wheel_circumference = self.config.tw_config.as_ref().unwrap().wheel_diameter * core::f64::consts::PI;
+
+            let parallel_distance = parallel_delta * wheel_circumference;
+            let perpendicular_distance = perpendicular_delta * wheel_circumference;
+
+            if t_delta.abs() > 1e-6 {
+                parallel_offset_sum += parallel_distance / t_delta;
+                perpendicular_offset_sum += perpendicular_distance / t_delta;
+            }
+        }
+
+        let parallel_offset = parallel_offset_sum / ITERATIONS as f64;
+        let perpendicular_offset = perpendicular_offset_sum / ITERATIONS as f64;
+
+        println!("parallel offset: {:.3} inches", parallel_offset);
+        println!("perpendicular offset: {:.3} inches", perpendicular_offset);
     }
 
     pub async fn drive_straight(&mut self, target_dist: f64, max_voltage: f64) {

@@ -105,6 +105,8 @@ impl Robot {
             triggers
         )
         .await;
+        
+
         Robot { chassis }
     }
 }
@@ -179,16 +181,7 @@ impl Compete for Robot {
             self.chassis.cheesy_control();
             let c_state = self.chassis.controller.state().unwrap_or_default();
             if c_state.button_a.is_pressed() {
-                self.chassis
-                    .drive_to_point(
-                        0.0,
-                        0.0,
-                        PoseSettings {
-                            max_voltage: 6.0,
-                            is_reversed: false,
-                        },
-                    )
-                    .await;
+                self.chassis.calibrate_tracking_wheels().await;
             }
             sleep(self.chassis.config.dt).await;
         }
