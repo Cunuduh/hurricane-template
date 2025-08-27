@@ -29,7 +29,7 @@ async fn main(peripherals: Peripherals) {
 }
 
 pub struct Robot {
-    chassis: Chassis<3, 3>,
+    chassis: Chassis<3, 3, 3>,
 }
 
 impl Robot {
@@ -44,13 +44,17 @@ impl Robot {
             Motor::new(peripherals.port_4, Gearset::Blue, Direction::Reverse),
             Motor::new(peripherals.port_6, Gearset::Blue, Direction::Forward),
         ];
-
         let imu = InertialSensor::new(peripherals.port_7);
         let parallel_wheel = RotationSensor::new(peripherals.port_8, Direction::Forward);
         let perpendicular_wheel = RotationSensor::new(peripherals.port_9, Direction::Forward);
+        let intake_motors = [
+            Motor::new(peripherals.port_10, Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.port_11, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.port_12, Gearset::Blue, Direction::Forward),
+        ];
         let tw_config = TrackingWheelConfig {
-            parallel_offset: -6.5,
-            perpendicular_offset: -6.5,
+            parallel_offset: 0.302,
+            perpendicular_offset: -0.021,
             wheel_diameter: 2.0,
         };
 
@@ -100,6 +104,7 @@ impl Robot {
             right_motors,
             parallel_wheel,
             perpendicular_wheel,
+            intake_motors,
             imu,
             config,
             triggers
@@ -126,21 +131,21 @@ impl Compete for Robot {
                 },
             ),
             (
-                Pose::new(24.0, 24.0),
+                Pose::new(12.0, 12.0),
                 PoseSettings {
                     max_voltage: drive_speed,
                     is_reversed: false,
                 },
             ),
             (
-                Pose::new(48.0, 0.0),
+                Pose::new(12.0, 12.0),
                 PoseSettings {
                     max_voltage: drive_speed,
                     is_reversed: false,
                 },
             ),
             (
-                Pose::with_heading(72.0, 24.0, 0.0),
+                Pose::with_heading(36.0, 12.0, 0.0),
                 PoseSettings {
                     max_voltage: drive_speed,
                     is_reversed: false,
@@ -148,6 +153,11 @@ impl Compete for Robot {
             ),
         ].into_boxed_slice());
         let plan = vec![
+            Action::DriveCurve {
+                points: points.clone(),
+                b: 0.005,
+                zeta: 0.75,
+            },
             Action::DrivePtp(points.clone()),
             Action::DriveToPoint(
                 Pose::new(0.0, 0.0),
@@ -163,11 +173,6 @@ impl Compete for Robot {
                     is_reversed: false,
                 },
             ),
-            Action::DriveCurve {
-                points: points.clone(),
-                b: 0.005,
-                zeta: 0.75,
-            },
             Action::TriggerOnDistance(
                 24.0,
                 "do something"
@@ -179,6 +184,7 @@ impl Compete for Robot {
     async fn driver(&mut self) {
         loop {
             self.chassis.cheesy_control();
+            self.chassis.handle_intake_outtake_controls();
             let c_state = self.chassis.controller.state().unwrap_or_default();
             if c_state.button_a.is_pressed() {
                 self.chassis.calibrate_tracking_wheels().await;

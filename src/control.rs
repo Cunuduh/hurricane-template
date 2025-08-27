@@ -86,11 +86,12 @@ pub struct ChassisConfig {
     pub tw_config: Option<TrackingWheelConfig>,
 }
 
-pub struct Chassis<const L: usize, const R: usize> {
+pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
     pub right_motors: [Motor; R],
     pub parallel_wheel: RotationSensor,
     pub perpendicular_wheel: RotationSensor,
+    pub intake_motors: [Motor; I],
     pub config: ChassisConfig,
     pub imu: InertialSensor,
     pub controller: Controller,
@@ -102,15 +103,32 @@ pub struct Chassis<const L: usize, const R: usize> {
     quick_stop_accumulator: f64,
     neg_inertia_accumulator: f64,
     pub triggers: TriggerManager,
+    // added: intake toggle state (0 = off, 1 = forward, -1 = reverse)
+    intake_state: i8,
+    prev_l1: bool,
+    // outtake-only control (no reverse) using R1
+    outtake_state: i8, // 0 = off, 1 = forward
+    prev_r1: bool,
+    // anti-jam: reverse briefly upon stall when using outtake control
+    outtake_jam_reverse_until: Option<Instant>,
+    // initial reverse on outtake toggle-on
+    outtake_initial_reverse_until: Option<Instant>,
+
+    // middle outtake (R2) with port-12 reversed
+    outtake_middle_state: i8, // 0 = off, 1 = forward
+    prev_r2: bool,
+    outtake_middle_jam_reverse_until: Option<Instant>,
+    outtake_middle_initial_reverse_until: Option<Instant>,
 }
 
-impl<const L: usize, const R: usize> Chassis<L, R> {
+impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     pub async fn new(
         controller: Controller,
         mut left_motors: [Motor; L],
         mut right_motors: [Motor; R],
         mut parallel_wheel: RotationSensor,
         mut perpendicular_wheel: RotationSensor,
+        mut intake_motors: [Motor; I],
         mut imu: InertialSensor,
         config: ChassisConfig,
         triggers: &'static [(&'static str, fn())],
@@ -126,6 +144,9 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let _ = m.reset_position();
         }
         for m in right_motors.iter_mut() {
+            let _ = m.reset_position();
+        }
+        for m in intake_motors.iter_mut() {
             let _ = m.reset_position();
         }
         let _ = parallel_wheel.reset_position();
@@ -149,6 +170,7 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             right_motors,
             parallel_wheel,
             perpendicular_wheel,
+            intake_motors,
             config,
             imu,
             controller,
@@ -160,6 +182,20 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             quick_stop_accumulator: 0.0,
             neg_inertia_accumulator: 0.0,
             triggers: TriggerManager::new(triggers),
+            // initialize new intake fields
+            intake_state: 0,
+            prev_l1: false,
+            // initialize outtake fields
+            outtake_state: 0,
+            prev_r1: false,
+            outtake_jam_reverse_until: None,
+            outtake_initial_reverse_until: None,
+
+            // init middle outtake fields
+            outtake_middle_state: 0,
+            prev_r2: false,
+            outtake_middle_jam_reverse_until: None,
+            outtake_middle_initial_reverse_until: None,
         }
     }
     fn normalize_angle(&self, mut angle: f64) -> f64 {
@@ -208,8 +244,9 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             0.0
         };
 
+        // Consider a stall only when motors draw significant current AND aren't moving
         if avg_current >= self.config.stall_current_threshold
-            || avg_velocity <= self.config.stall_velocity_threshold
+            && avg_velocity <= self.config.stall_velocity_threshold
         {
             if self.stall_timer.is_none() {
                 self.stall_timer = Some(Instant::now());
@@ -299,6 +336,257 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let _ = m.set_voltage(vr);
         }
     }
+    pub fn intake_control(&mut self) {
+        let c_state = self.controller.state().unwrap_or_default();
+        let l1 = c_state.button_l1.is_pressed();
+        let l2 = c_state.button_l2.is_pressed();
+
+        if l1 && !self.prev_l1 {
+            self.intake_state = if self.intake_state == 1 { 0 } else { 1 };
+        }
+        self.prev_l1 = l1;
+
+        let dir = if l2 { -1.0 } else { self.intake_state as f64 };
+
+        let outtake_overriding = self.outtake_state != 0
+            || self.outtake_jam_reverse_until.is_some()
+            || self.outtake_initial_reverse_until.is_some()
+            || self.outtake_middle_state != 0
+            || self.outtake_middle_jam_reverse_until.is_some()
+            || self.outtake_middle_initial_reverse_until.is_some();
+
+        if !outtake_overriding {
+            for m in self.intake_motors.iter_mut() {
+                let _ = m.set_voltage(12.0 * dir);
+            }
+        }
+    }
+
+    pub fn outtake_control(&mut self) {
+        let c_state = self.controller.state().unwrap_or_default();
+        let r1 = c_state.button_r1.is_pressed();
+
+        if r1 && !self.prev_r1 {
+            if self.outtake_state == 1 {
+                self.outtake_state = 0;
+                self.outtake_jam_reverse_until = None;
+                self.outtake_initial_reverse_until = None;
+            } else {
+                self.outtake_state = 1;
+                self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(125));
+            }
+        }
+        self.prev_r1 = r1;
+
+        self.poll_outtake_stall_and_reverse();
+
+        let reversing = self.outtake_initial_reverse_until.is_some() || self.outtake_jam_reverse_until.is_some();
+        let dir = if reversing {
+            -1.0
+        } else {
+            self.outtake_state as f64
+        };
+
+        if dir != 0.0 {
+            for m in self.intake_motors.iter_mut() {
+                let _ = m.set_voltage(12.0 * dir);
+            }
+        }
+    }
+
+    pub fn outtake_middle_control(&mut self) {
+        let c_state = self.controller.state().unwrap_or_default();
+        let r2 = c_state.button_r2.is_pressed();
+
+        if r2 && !self.prev_r2 {
+            if self.outtake_middle_state == 1 {
+                self.outtake_middle_state = 0;
+                self.outtake_middle_jam_reverse_until = None;
+                self.outtake_middle_initial_reverse_until = None;
+            } else {
+                self.outtake_middle_state = 1;
+                self.outtake_middle_initial_reverse_until =
+                    Some(Instant::now() + Duration::from_millis(125));
+            }
+        }
+        self.prev_r2 = r2;
+
+        self.poll_outtake_middle_stall_and_reverse();
+
+        let reversing = self.outtake_middle_initial_reverse_until.is_some()
+            || self.outtake_middle_jam_reverse_until.is_some();
+        let dir = if reversing { -1.0 } else { self.outtake_middle_state as f64 };
+
+        if dir != 0.0 {
+            for (i, m) in self.intake_motors.iter_mut().enumerate() {
+                let applied = if i == 2 { -dir } else { dir };
+                let _ = m.set_voltage(12.0 * applied);
+            }
+        }
+    }
+
+    pub fn handle_intake_outtake_controls(&mut self) {
+        let c_state = self.controller.state().unwrap_or_default();
+        let l1 = c_state.button_l1.is_pressed();
+        let l2 = c_state.button_l2.is_pressed();
+        let r1 = c_state.button_r1.is_pressed();
+        let r2 = c_state.button_r2.is_pressed();
+
+        let l1_edge = l1 && !self.prev_l1;
+        let r1_edge = r1 && !self.prev_r1;
+        let r2_edge = r2 && !self.prev_r2;
+
+        let any_running = self.intake_state != 0
+            || self.outtake_state != 0
+            || self.outtake_middle_state != 0
+            || self.outtake_initial_reverse_until.is_some()
+            || self.outtake_jam_reverse_until.is_some()
+            || self.outtake_middle_initial_reverse_until.is_some()
+            || self.outtake_middle_jam_reverse_until.is_some();
+
+        if (l1_edge || r1_edge || r2_edge) && any_running {
+            self.intake_state = 0;
+            self.outtake_state = 0;
+            self.outtake_middle_state = 0;
+            self.outtake_initial_reverse_until = None;
+            self.outtake_jam_reverse_until = None;
+            self.outtake_middle_initial_reverse_until = None;
+            self.outtake_middle_jam_reverse_until = None;
+            for m in self.intake_motors.iter_mut() { let _ = m.set_voltage(0.0); }
+            self.prev_l1 = l1;
+            self.prev_r1 = r1;
+            self.prev_r2 = r2;
+            return;
+        }
+
+        if !(self.intake_state != 0
+            || self.outtake_state != 0
+            || self.outtake_middle_state != 0
+            || self.outtake_initial_reverse_until.is_some()
+            || self.outtake_jam_reverse_until.is_some()
+            || self.outtake_middle_initial_reverse_until.is_some()
+            || self.outtake_middle_jam_reverse_until.is_some()) {
+            if l1_edge {
+                self.intake_state = if self.intake_state == 1 { 0 } else { 1 };
+            } else if r1_edge {
+                if self.outtake_state == 1 {
+                    self.outtake_state = 0;
+                    self.outtake_jam_reverse_until = None;
+                    self.outtake_initial_reverse_until = None;
+                } else {
+                    self.outtake_state = 1;
+                    self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(125));
+                }
+            } else if r2_edge {
+                if self.outtake_middle_state == 1 {
+                    self.outtake_middle_state = 0;
+                    self.outtake_middle_jam_reverse_until = None;
+                    self.outtake_middle_initial_reverse_until = None;
+                } else {
+                    self.outtake_middle_state = 1;
+                    self.outtake_middle_initial_reverse_until = Some(Instant::now() + Duration::from_millis(125));
+                }
+            }
+        }
+
+        self.prev_l1 = l1;
+        self.prev_r1 = r1;
+        self.prev_r2 = r2;
+
+        self.poll_outtake_stall_and_reverse();
+        self.poll_outtake_middle_stall_and_reverse();
+
+        let reversing_outtake = self.outtake_initial_reverse_until.is_some() || self.outtake_jam_reverse_until.is_some();
+        let reversing_outtake_middle = self.outtake_middle_initial_reverse_until.is_some() || self.outtake_middle_jam_reverse_until.is_some();
+
+        let outtake_middle_active = self.outtake_middle_state != 0 || reversing_outtake_middle;
+        if outtake_middle_active {
+            let dir = if reversing_outtake_middle { -1.0 } else { self.outtake_middle_state as f64 };
+            if dir != 0.0 {
+                for (i, m) in self.intake_motors.iter_mut().enumerate() {
+                    let applied = if i == 2 { -dir } else { dir };
+                    let _ = m.set_voltage(12.0 * applied);
+                }
+                return;
+            }
+        }
+
+        let outtake_active = self.outtake_state != 0 || reversing_outtake;
+        if outtake_active {
+            let dir = if reversing_outtake { -1.0 } else { self.outtake_state as f64 };
+            if dir != 0.0 {
+                for m in self.intake_motors.iter_mut() { let _ = m.set_voltage(12.0 * dir); }
+                return;
+            }
+        }
+
+        let dir = if l2 { -1.0 } else { self.intake_state as f64 };
+        if dir != 0.0 {
+            for m in self.intake_motors.iter_mut() { let _ = m.set_voltage(12.0 * dir); }
+        }
+    }
+
+    fn poll_outtake_stall_and_reverse(&mut self) {
+        let now = Instant::now();
+
+        if let Some(until) = self.outtake_initial_reverse_until
+            && now >= until {
+                self.outtake_initial_reverse_until = None;
+            }
+        if let Some(until) = self.outtake_jam_reverse_until
+            && now >= until {
+                self.outtake_jam_reverse_until = None;
+            }
+
+        if self.outtake_initial_reverse_until.is_some() || self.outtake_jam_reverse_until.is_some() {
+            return;
+        }
+
+        if self.outtake_state == 1 && self.intake_stalled() {
+            self.outtake_jam_reverse_until = Some(now + Duration::from_millis(150));
+        }
+    }
+
+    fn poll_outtake_middle_stall_and_reverse(&mut self) {
+        let now = Instant::now();
+
+        if let Some(until) = self.outtake_middle_initial_reverse_until
+            && now >= until {
+                self.outtake_middle_initial_reverse_until = None;
+            }
+        if let Some(until) = self.outtake_middle_jam_reverse_until
+            && now >= until {
+                self.outtake_middle_jam_reverse_until = None;
+            }
+
+        if self.outtake_middle_initial_reverse_until.is_some() || self.outtake_middle_jam_reverse_until.is_some() {
+            return;
+        }
+
+        if self.outtake_middle_state == 1 && self.intake_stalled() {
+            self.outtake_middle_jam_reverse_until = Some(now + Duration::from_millis(150));
+        }
+    }
+
+    pub fn intake_stalled(&self) -> bool {
+        let current_thresh = self.config.stall_current_threshold;
+        let vel_thresh = self.config.stall_velocity_threshold;
+
+        let mut any_stalled = false;
+        for m in self.intake_motors.iter() {
+            let current = m.current().unwrap_or_default();
+            let velocity = m.velocity().unwrap_or_default().abs();
+            if current >= current_thresh && velocity <= vel_thresh {
+                let port = m.port_number();
+                println!(
+                    "intake_stalled: motor port {} current={:.3}A velocity={:.3} (thresh curr={:.3}, vel={:.3})",
+                    port, current, velocity, current_thresh, vel_thresh
+                );
+                any_stalled = true;
+            }
+        }
+        any_stalled
+    }
     pub async fn drive_ptp(
         &mut self,
         points: &[(Pose, PoseSettings)],
@@ -351,23 +639,16 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             p.point.heading = self.normalize_angle(p.point.heading);
         });
 
-        // compute curvature using finite differences of heading (more stable than triangle method from before)
+        // compute curvature as |Δθ|/Δs using centered difference
         for i in 1..(m-1) {
             let h_prev = profile_points[i-1].point.heading;
-            let h_curr = profile_points[i].point.heading;
             let h_next = profile_points[i+1].point.heading;
-            
             let d_prev = profile_points[i].distance - profile_points[i-1].distance;
             let d_next = profile_points[i+1].distance - profile_points[i].distance;
-            
-            if d_prev > 1e-9 && d_next > 1e-9 {
-                let dh1 = self.normalize_angle(h_curr - h_prev);
-                let dh2 = self.normalize_angle(h_next - h_curr);
-                let avg_ds = (d_prev + d_next) / 2.0;
-                
-                // second derivative of heading approximation
-                let d2h = (dh2 / d_next - dh1 / d_prev) / avg_ds;
-                profile_points[i].curvature = d2h.abs();
+            let ds = d_prev + d_next;
+            if d_prev > 1e-9 && d_next > 1e-9 && ds > 1e-9 {
+                let dtheta = self.normalize_angle(h_next - h_prev).abs();
+                profile_points[i].curvature = dtheta / ds;
             }
         }
 
@@ -421,8 +702,10 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         times.push(0.0);
         for i in 1..m {
             let d = profile_points[i].distance - profile_points[i - 1].distance;
-            let v = profile_points[i].velocity;
-            times.push(times[i - 1] + d / v);
+            let v_prev = profile_points[i - 1].velocity.max(1e-6);
+            let v_curr = profile_points[i].velocity.max(1e-6);
+            let v_avg = 0.5 * (v_prev + v_curr);
+            times.push(times[i - 1] + d / v_avg);
         }
         let total_time = *times.last().unwrap_or(&0.0);
 
@@ -486,7 +769,7 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         let mut seg_i = 0;
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
-        let mut vel_timer: Option<Instant> = None;
+        let safety_timeout = Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(1500));
 
         loop {
             let now = Instant::now();
@@ -498,14 +781,10 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             last_time = now;
             let elapsed = now.duration_since(start_time).as_secs_f64();
             self.update_odometry();
-            
-            let mut total_velocity = 0.0;
-            let mut num_motors = 0;
-            for motor in self.left_motors.iter().chain(self.right_motors.iter()) {
-                total_velocity += motor.velocity().unwrap_or_default().abs();
-                num_motors += 1;
+            if now.duration_since(start_time) >= safety_timeout {
+                println!("ramsete: timeout");
+                break;
             }
-            let avg_velocity = if num_motors > 0 { total_velocity / num_motors as f64 } else { 0.0 };
             
             let current = self.odometry.pose();
             let goal = profile.last().unwrap().point;
@@ -515,7 +794,6 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             
             if dist_err <= self.config.small_drive_exit_error {
                 big_timer = None;
-                vel_timer = None;
                 if small_timer.is_none() {
                     small_timer = Some(Instant::now());
                 }
@@ -527,7 +805,6 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             } else {
                 small_timer = None;
                 if dist_err <= self.config.big_drive_exit_error {
-                    vel_timer = None;
                     if big_timer.is_none() {
                         big_timer = Some(Instant::now());
                     }
@@ -538,18 +815,6 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                         }
                 } else {
                     big_timer = None;
-                    if avg_velocity <= self.config.stall_velocity_threshold {
-                        if vel_timer.is_none() {
-                            vel_timer = Some(Instant::now());
-                        }
-                        if let Some(t) = vel_timer
-                            && t.elapsed() >= self.config.stall_time {
-                                println!("ramsete: done (low velocity detected)");
-                                break;
-                            }
-                    } else {
-                        vel_timer = None;
-                    }
                 }
             }
             
@@ -604,9 +869,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             } else {
                 1.0
             };
-            let v_d = v0 + (v1 - v0) * tau * reversed;
+            let v_d = (v0 + (v1 - v0) * tau) * reversed;
             
-            self.update_odometry();
             let pose = self.odometry.pose();
             let dx = x_d - pose.x;
             let dy = y_d - pose.y;
@@ -627,6 +891,10 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0) * (self.config.wheel_diameter * PI);
             let vl = (wheel_vel_l / max_linear_vel * self.config.max_volts).clamp(-self.config.max_volts, self.config.max_volts);
             let vr = (wheel_vel_r / max_linear_vel * self.config.max_volts).clamp(-self.config.max_volts, self.config.max_volts);
+            if vl.abs().max(vr.abs()) >= 3.0 && self.check_stall() {
+                println!("ramsete: stall detected");
+                break;
+            }
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(vr); }
         }
@@ -689,6 +957,15 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         let mut t0 = Instant::now();
         let mut ts: Option<Instant> = None;
         let mut tb: Option<Instant> = None;
+        let timeout = {
+            let deg = a_deg.abs().clamp(10.0, 180.0);
+            // 30 ms per deg, min 1.5s, max 6s
+            let ms = (deg * 30.0).clamp(1500.0, 6000.0);
+            Duration::from_millis(ms as u64)
+        };
+        let t_start = Instant::now();
+        const TURN_MIN_VOLTAGE: f64 = 1.5;
+        const STALL_CMD_THRESHOLD_V: f64 = 3.0;
 
         loop {
             let t = Instant::now();
@@ -705,9 +982,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             let dh = self.normalize_angle(h - initial_heading);
             self.triggers.check_angle(dh.to_degrees());
             let e = self.normalize_angle(a - h);
-
-            if self.check_stall() {
-                println!("turn_to_angle: stall detected");
+            if t.duration_since(t_start) >= timeout {
+                println!("turn_to_angle: timeout");
                 break;
             }
             
@@ -737,8 +1013,16 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                     tb = None;
                 }
             }
+            let mut u = pid.next(e, dt);
+            if e2 > 0.5 {
+                u += e.signum() * TURN_MIN_VOLTAGE;
+            }
+            u = u.clamp(-v, v);
 
-            let u = pid.next(e, dt).clamp(-v, v);
+            if u.abs() >= STALL_CMD_THRESHOLD_V && self.check_stall() {
+                println!("turn_to_angle: stall detected");
+                break;
+            }
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(u); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(-u); }
         }
@@ -808,6 +1092,15 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
         let mut small_error_timer: Option<Instant> = None;
         let mut big_error_timer: Option<Instant> = None;
 
+        let timeout = {
+            let inches = target_dist.abs().clamp(12.0, 120.0);
+            let ms = (inches * 80.0).clamp(1500.0, 8000.0);
+            Duration::from_millis(ms as u64)
+        };
+        let t_start = Instant::now();
+        const DRIVE_MIN_VOLTAGE: f64 = 1.25;
+        const STALL_CMD_THRESHOLD_V: f64 = 3.0;
+
         loop {
             let now = Instant::now();
             let dt = now.duration_since(last_time).as_secs_f64();
@@ -818,8 +1111,8 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
             last_time = now;
 
             self.update_odometry();
-            if self.check_stall() {
-                println!("drive_straight: stall detected");
+            if now.duration_since(t_start) >= timeout {
+                println!("drive_straight: timeout");
                 break;
             }
 
@@ -857,13 +1150,20 @@ impl<const L: usize, const R: usize> Chassis<L, R> {
                 }
             }
 
-            let u = drive_pid.next(err, dt);
+            let mut u = drive_pid.next(err, dt);
+            if err.abs() > 0.25 {
+                u += err.signum() * DRIVE_MIN_VOLTAGE;
+            }
             let heading_error = self.normalize_angle(initial_heading - current.heading);
             let tc = heading_pid.next(heading_error, dt)
                 .clamp(-self.config.max_volts, self.config.max_volts);
 
             let vl = (u + tc).clamp(-max_voltage, max_voltage);
             let vr = (u - tc).clamp(-max_voltage, max_voltage);
+            if vl.abs().max(vr.abs()) >= STALL_CMD_THRESHOLD_V && self.check_stall() {
+                println!("drive_straight: stall detected");
+                break;
+            }
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(vr); }
         }

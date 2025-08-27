@@ -81,12 +81,8 @@ pub fn interpolate_catmull_rom(
         for step in 0..steps {
             let t = step as f64 / steps as f64;
             let (mut pt, dx, dy) = catmull_rom(&p0, &p1, &p2, &p3, t, ALPHA);
-            let settings = points[i].1;
-            pt.heading = if settings.is_reversed {
-                (-dy).atan2(dx)
-            } else {
-                dy.atan2(dx)
-            };
+            // heading is tangent of the spline; reverse handling is applied later
+            pt.heading = dy.atan2(dx);
             result.push((pt, points[i].1));
         }
     }
