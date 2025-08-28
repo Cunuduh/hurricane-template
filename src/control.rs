@@ -387,7 +387,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.outtake_initial_reverse_until = None;
                 } else {
                     self.outtake_state = 1;
-                    self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(200));
+                    self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(175));
                 }
             } else if r2_edge {
                 if self.outtake_middle_state == 1 {
@@ -396,7 +396,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.outtake_middle_initial_reverse_until = None;
                 } else {
                     self.outtake_middle_state = 1;
-                    self.outtake_middle_initial_reverse_until = Some(Instant::now() + Duration::from_millis(200));
+                    self.outtake_middle_initial_reverse_until = Some(Instant::now() + Duration::from_millis(175));
                 }
             }
         }
