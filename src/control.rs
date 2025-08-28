@@ -404,6 +404,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.prev_l1 = l1;
         self.prev_r1 = r1;
         self.prev_r2 = r2;
+        
+        if l2 {
+            for m in self.intake_motors.iter_mut() { let _ = m.set_voltage(-12.0); }
+            return;
+        }
 
         let stalled = self.intake_stalled();
         Self::poll_stall_and_reverse_for(
