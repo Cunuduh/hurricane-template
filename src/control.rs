@@ -336,94 +336,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let _ = m.set_voltage(vr);
         }
     }
-    pub fn intake_control(&mut self) {
-        let c_state = self.controller.state().unwrap_or_default();
-        let l1 = c_state.button_l1.is_pressed();
-        let l2 = c_state.button_l2.is_pressed();
-
-        if l1 && !self.prev_l1 {
-            self.intake_state = if self.intake_state == 1 { 0 } else { 1 };
-        }
-        self.prev_l1 = l1;
-
-        let dir = if l2 { -1.0 } else { self.intake_state as f64 };
-
-        let outtake_overriding = self.outtake_state != 0
-            || self.outtake_jam_reverse_until.is_some()
-            || self.outtake_initial_reverse_until.is_some()
-            || self.outtake_middle_state != 0
-            || self.outtake_middle_jam_reverse_until.is_some()
-            || self.outtake_middle_initial_reverse_until.is_some();
-
-        if !outtake_overriding {
-            for m in self.intake_motors.iter_mut() {
-                let _ = m.set_voltage(12.0 * dir);
-            }
-        }
-    }
-
-    pub fn outtake_control(&mut self) {
-        let c_state = self.controller.state().unwrap_or_default();
-        let r1 = c_state.button_r1.is_pressed();
-
-        if r1 && !self.prev_r1 {
-            if self.outtake_state == 1 {
-                self.outtake_state = 0;
-                self.outtake_jam_reverse_until = None;
-                self.outtake_initial_reverse_until = None;
-            } else {
-                self.outtake_state = 1;
-                self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(125));
-            }
-        }
-        self.prev_r1 = r1;
-
-        self.poll_outtake_stall_and_reverse();
-
-        let reversing = self.outtake_initial_reverse_until.is_some() || self.outtake_jam_reverse_until.is_some();
-        let dir = if reversing {
-            -1.0
-        } else {
-            self.outtake_state as f64
-        };
-
-        if dir != 0.0 {
-            for m in self.intake_motors.iter_mut() {
-                let _ = m.set_voltage(12.0 * dir);
-            }
-        }
-    }
-
-    pub fn outtake_middle_control(&mut self) {
-        let c_state = self.controller.state().unwrap_or_default();
-        let r2 = c_state.button_r2.is_pressed();
-
-        if r2 && !self.prev_r2 {
-            if self.outtake_middle_state == 1 {
-                self.outtake_middle_state = 0;
-                self.outtake_middle_jam_reverse_until = None;
-                self.outtake_middle_initial_reverse_until = None;
-            } else {
-                self.outtake_middle_state = 1;
-                self.outtake_middle_initial_reverse_until =
-                    Some(Instant::now() + Duration::from_millis(125));
-            }
-        }
-        self.prev_r2 = r2;
-
-        self.poll_outtake_middle_stall_and_reverse();
-
-        let reversing = self.outtake_middle_initial_reverse_until.is_some()
-            || self.outtake_middle_jam_reverse_until.is_some();
-        let dir = if reversing { -1.0 } else { self.outtake_middle_state as f64 };
-
-        if dir != 0.0 {
-            for (i, m) in self.intake_motors.iter_mut().enumerate() {
-                let applied = if i == 2 { -dir } else { dir };
-                let _ = m.set_voltage(12.0 * applied);
-            }
-        }
-    }
 
     pub fn handle_intake_outtake_controls(&mut self) {
         let c_state = self.controller.state().unwrap_or_default();
@@ -475,7 +387,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.outtake_initial_reverse_until = None;
                 } else {
                     self.outtake_state = 1;
-                    self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(125));
+                    self.outtake_initial_reverse_until = Some(Instant::now() + Duration::from_millis(200));
                 }
             } else if r2_edge {
                 if self.outtake_middle_state == 1 {
@@ -484,7 +396,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.outtake_middle_initial_reverse_until = None;
                 } else {
                     self.outtake_middle_state = 1;
-                    self.outtake_middle_initial_reverse_until = Some(Instant::now() + Duration::from_millis(125));
+                    self.outtake_middle_initial_reverse_until = Some(Instant::now() + Duration::from_millis(200));
                 }
             }
         }
@@ -493,15 +405,26 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.prev_r1 = r1;
         self.prev_r2 = r2;
 
-        self.poll_outtake_stall_and_reverse();
-        self.poll_outtake_middle_stall_and_reverse();
+        let stalled = self.intake_stalled();
+        Self::poll_stall_and_reverse_for(
+            self.outtake_state,
+            stalled,
+            &mut self.outtake_initial_reverse_until,
+            &mut self.outtake_jam_reverse_until,
+        );
+        Self::poll_stall_and_reverse_for(
+            self.outtake_middle_state,
+            stalled,
+            &mut self.outtake_middle_initial_reverse_until,
+            &mut self.outtake_middle_jam_reverse_until,
+        );
 
         let reversing_outtake = self.outtake_initial_reverse_until.is_some() || self.outtake_jam_reverse_until.is_some();
         let reversing_outtake_middle = self.outtake_middle_initial_reverse_until.is_some() || self.outtake_middle_jam_reverse_until.is_some();
 
         let outtake_middle_active = self.outtake_middle_state != 0 || reversing_outtake_middle;
         if outtake_middle_active {
-            let dir = if reversing_outtake_middle { -1.0 } else { self.outtake_middle_state as f64 };
+            let dir = if l2 || reversing_outtake_middle { -1.0 } else { self.outtake_middle_state as f64 };
             if dir != 0.0 {
                 for (i, m) in self.intake_motors.iter_mut().enumerate() {
                     let applied = if i == 2 { -dir } else { dir };
@@ -513,7 +436,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         let outtake_active = self.outtake_state != 0 || reversing_outtake;
         if outtake_active {
-            let dir = if reversing_outtake { -1.0 } else { self.outtake_state as f64 };
+            let dir = if l2 || reversing_outtake { -1.0 } else { self.outtake_state as f64 };
             if dir != 0.0 {
                 for m in self.intake_motors.iter_mut() { let _ = m.set_voltage(12.0 * dir); }
                 return;
@@ -526,45 +449,29 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
     }
 
-    fn poll_outtake_stall_and_reverse(&mut self) {
+    fn poll_stall_and_reverse_for(
+        state: i8,
+        stalled: bool,
+        initial_reverse_until: &mut Option<Instant>,
+        jam_reverse_until: &mut Option<Instant>,
+    ) {
         let now = Instant::now();
 
-        if let Some(until) = self.outtake_initial_reverse_until
+        if let Some(until) = *initial_reverse_until
             && now >= until {
-                self.outtake_initial_reverse_until = None;
+                *initial_reverse_until = None;
             }
-        if let Some(until) = self.outtake_jam_reverse_until
+        if let Some(until) = *jam_reverse_until
             && now >= until {
-                self.outtake_jam_reverse_until = None;
+                *jam_reverse_until = None;
             }
 
-        if self.outtake_initial_reverse_until.is_some() || self.outtake_jam_reverse_until.is_some() {
+        if initial_reverse_until.is_some() || jam_reverse_until.is_some() {
             return;
         }
 
-        if self.outtake_state == 1 && self.intake_stalled() {
-            self.outtake_jam_reverse_until = Some(now + Duration::from_millis(150));
-        }
-    }
-
-    fn poll_outtake_middle_stall_and_reverse(&mut self) {
-        let now = Instant::now();
-
-        if let Some(until) = self.outtake_middle_initial_reverse_until
-            && now >= until {
-                self.outtake_middle_initial_reverse_until = None;
-            }
-        if let Some(until) = self.outtake_middle_jam_reverse_until
-            && now >= until {
-                self.outtake_middle_jam_reverse_until = None;
-            }
-
-        if self.outtake_middle_initial_reverse_until.is_some() || self.outtake_middle_jam_reverse_until.is_some() {
-            return;
-        }
-
-        if self.outtake_middle_state == 1 && self.intake_stalled() {
-            self.outtake_middle_jam_reverse_until = Some(now + Duration::from_millis(150));
+        if state == 1 && stalled {
+            *jam_reverse_until = Some(now + Duration::from_millis(150));
         }
     }
 
