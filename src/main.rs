@@ -7,7 +7,7 @@ use core::time::Duration;
 use vexide::{devices::smart::imu::InertialSensor, prelude::*};
 
 use crate::{
-    control::{Chassis, ChassisConfig},
+    control::{Chassis, ChassisArgs, ChassisConfig},
     odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
 };
@@ -146,18 +146,18 @@ impl Robot {
             }),
         ];
         let chassis = Chassis::new(
-            peripherals.primary_controller,
-            left_motors,
-            right_motors,
-            parallel_wheel,
-            perpendicular_wheel,
-            intake_motors,
-            imu,
-            config,
-            triggers
-        )
-        .await;
-        
+            ChassisArgs {
+                controller: peripherals.primary_controller,
+                left_motors,
+                right_motors,
+                parallel_wheel,
+                perpendicular_wheel,
+                intake_motors,
+                imu,
+                config,
+                triggers
+            }
+        ).await;
 
         (Robot { chassis, ui: None }, peripherals.display)
     }

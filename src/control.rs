@@ -103,62 +103,58 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     quick_stop_accumulator: f64,
     neg_inertia_accumulator: f64,
     pub triggers: TriggerManager,
-    // added: intake toggle state (0 = off, 1 = forward, -1 = reverse)
     intake_state: i8,
     prev_l1: bool,
-    // outtake-only control (no reverse) using R1
-    outtake_state: i8, // 0 = off, 1 = forward
+    outtake_state: i8,
     prev_r1: bool,
-    // anti-jam: reverse briefly upon stall when using outtake control
     outtake_jam_reverse_until: Option<Instant>,
-    // initial reverse on outtake toggle-on
     outtake_initial_reverse_until: Option<Instant>,
-
-    // middle outtake (R2) with port-12 reversed
-    outtake_middle_state: i8, // 0 = off, 1 = forward
+    outtake_middle_state: i8,
     prev_r2: bool,
     outtake_middle_jam_reverse_until: Option<Instant>,
     outtake_middle_initial_reverse_until: Option<Instant>,
 }
-
+pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
+    pub left_motors: [Motor; L],
+    pub right_motors: [Motor; R],
+    pub parallel_wheel: RotationSensor,
+    pub perpendicular_wheel: RotationSensor,
+    pub intake_motors: [Motor; I],
+    pub imu: InertialSensor,
+    pub controller: Controller,
+    pub config: ChassisConfig,
+    pub triggers: &'static [(&'static str, fn())],
+}
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     pub async fn new(
-        controller: Controller,
-        mut left_motors: [Motor; L],
-        mut right_motors: [Motor; R],
-        mut parallel_wheel: RotationSensor,
-        mut perpendicular_wheel: RotationSensor,
-        mut intake_motors: [Motor; I],
-        mut imu: InertialSensor,
-        config: ChassisConfig,
-        triggers: &'static [(&'static str, fn())],
+        mut args: ChassisArgs<L, R, I>,
     ) -> Self {
-        let _ = imu.calibrate().await;
-        
-        let _ = imu.reset_heading();
-        let _ = imu.reset_rotation();
-        let _ = imu.set_rotation(config.initial_pose.heading.to_degrees());
+        let _ = args.imu.calibrate().await;
+
+        let _ = args.imu.reset_heading();
+        let _ = args.imu.reset_rotation();
+        let _ = args.imu.set_rotation(args.config.initial_pose.heading.to_degrees());
 
 
-        for m in left_motors.iter_mut() {
+        for m in args.left_motors.iter_mut() {
             let _ = m.reset_position();
         }
-        for m in right_motors.iter_mut() {
+        for m in args.right_motors.iter_mut() {
             let _ = m.reset_position();
         }
-        for m in intake_motors.iter_mut() {
+        for m in args.intake_motors.iter_mut() {
             let _ = m.reset_position();
         }
-        let _ = parallel_wheel.reset_position();
-        let _ = perpendicular_wheel.reset_position();
+        let _ = args.parallel_wheel.reset_position();
+        let _ = args.perpendicular_wheel.reset_position();
         let odometry = Odometry::new(
-            config.initial_pose, 
-            config.wheel_diameter,
-            config.track_width,
-            config.ext_gear_ratio,
-            config.tw_config,
+            args.config.initial_pose,
+            args.config.wheel_diameter,
+            args.config.track_width,
+            args.config.ext_gear_ratio,
+            args.config.tw_config,
         );
-        let motor_free_rpm = match left_motors[0].gearset() {
+        let motor_free_rpm = match args.left_motors[0].gearset() {
             Ok(Gearset::Blue) => 600.0,
             Ok(Gearset::Green) => 200.0,
             Ok(Gearset::Red) => 100.0,
@@ -166,14 +162,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         };
 
         Self {
-            left_motors,
-            right_motors,
-            parallel_wheel,
-            perpendicular_wheel,
-            intake_motors,
-            config,
-            imu,
-            controller,
+            left_motors: args.left_motors,
+            right_motors: args.right_motors,
+            parallel_wheel: args.parallel_wheel,
+            perpendicular_wheel: args.perpendicular_wheel,
+            intake_motors: args.intake_motors,
+            config: args.config,
+            imu: args.imu,
+            controller: args.controller,
             odometry,
             motor_free_rpm,
             stall_timer: None,
@@ -181,7 +177,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             prev_throttle: 0.0,
             quick_stop_accumulator: 0.0,
             neg_inertia_accumulator: 0.0,
-            triggers: TriggerManager::new(triggers),
+            triggers: TriggerManager::new(args.triggers),
             // initialize new intake fields
             intake_state: 0,
             prev_l1: false,
@@ -915,7 +911,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     tb = None;
                 }
             }
-            let u = pid.next(e, dt);
+            let u = pid.next(e, dt).clamp(-v, v);
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(u); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(-u); }
         }
