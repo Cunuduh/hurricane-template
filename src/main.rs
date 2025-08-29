@@ -32,7 +32,7 @@ use slint::ComponentHandle;
 async fn main(peripherals: Peripherals) {
     let (mut robot, display) = Robot::new(peripherals).await;
     vexide_slint::initialize_slint_platform(display);
-    let ui = VexSelector::new().unwrap();
+    let ui = VexSelector::new().expect("failed to create application");
     ui.on_route_selected(|idx| {
         let i = idx as usize;
         UI_SELECTED_ROUTE.store(i, Ordering::Relaxed);
@@ -67,7 +67,7 @@ async fn main(peripherals: Peripherals) {
             ui.set_selected_route(sel as i32);
         }
     }
-    let _ = ui.show();
+    ui.run().expect("failed to run application");
     robot.ui = Some(ui.as_weak());
     vexide::task::spawn(robot.compete()).detach();
 }
