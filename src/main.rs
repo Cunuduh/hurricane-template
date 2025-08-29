@@ -14,7 +14,7 @@ use crate::{
 use core::sync::atomic::{AtomicUsize, Ordering};
 static UI_SELECTED_ROUTE: AtomicUsize = AtomicUsize::new(0);
 use vexide::fs;
-const AUTON_SAVE_PATH: &str = "/sd/auton.txt";
+const AUTON_SAVE_PATH: &str = "auton.txt";
 use alloc::string::ToString;
 
 mod chassis;
