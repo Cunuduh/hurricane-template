@@ -4,7 +4,7 @@ use alloc::{
     vec::Vec,
 };
 use crate::odometry::Pose;
-use crate::control::PoseSettings;
+use crate::chassis::PoseSettings;
 use crate::triggers::TriggerCondition;
 use crate::Robot;
 pub enum Action {

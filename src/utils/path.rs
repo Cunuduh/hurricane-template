@@ -1,7 +1,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use vexide::prelude::Float;
-use crate::{control::{Pos2Like, PoseSettings}, odometry::Pose};
+use crate::{chassis::PoseSettings, odometry::{Pose, Pos2Like}};
 
 fn catmull_rom<T: Pos2Like + Clone>(
     p0: &T,

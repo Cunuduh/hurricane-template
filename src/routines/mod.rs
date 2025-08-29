@@ -2,7 +2,7 @@ extern crate alloc;
 use alloc::{vec::Vec, string::String, boxed::Box};
 use serde::{Deserialize, Serialize};
 
-use crate::control::PoseSettings;
+use crate::chassis::PoseSettings;
 use crate::odometry::Pose;
 use crate::plan::Action;
 

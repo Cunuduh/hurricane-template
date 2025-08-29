@@ -7,7 +7,7 @@ use core::time::Duration;
 use vexide::{devices::smart::imu::InertialSensor, prelude::*};
 
 use crate::{
-    control::{Chassis, ChassisArgs, ChassisConfig},
+    chassis::{Chassis, ChassisArgs, ChassisConfig},
     odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
 };
@@ -17,7 +17,9 @@ use vexide::fs;
 const AUTON_SAVE_PATH: &str = "/sd/auton.txt";
 use alloc::string::ToString;
 
-mod control;
+mod chassis;
+mod autonomous;
+mod driver_control;
 mod odometry;
 mod pid;
 mod plan;

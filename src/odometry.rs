@@ -1,7 +1,17 @@
 use core::f64::consts::PI;
 use vexide::prelude::Float;
 use vexide::prelude::Position;
-use crate::control::Pos2Like;
+
+pub trait Pos2Like {
+    fn x(&self) -> f64;
+    fn y(&self) -> f64;
+    fn distance(&self, other: &Self) -> f64 {
+        let dx = self.x() - other.x();
+        let dy = self.y() - other.y();
+        dx.hypot(dy)
+    }
+    fn lerp(&self, other: &Self, t: f64) -> Self;
+}
 
 #[derive(Default, Copy, Clone, Debug)]
 pub struct Pose {
