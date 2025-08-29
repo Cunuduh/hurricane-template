@@ -8,11 +8,7 @@ use crate::control::PoseSettings;
 use crate::triggers::TriggerCondition;
 use crate::Robot;
 pub enum Action {
-    DriveCurve {
-        points: Arc<[(Pose, PoseSettings)]>,
-        b: f64,
-        zeta: f64,
-    },
+    DriveCurve(Arc<[(Pose, PoseSettings)]>),
     DrivePtp(Arc<[(Pose, PoseSettings)]>),
     DriveToPoint(Pose, PoseSettings),
     DriveStraight(f64, PoseSettings),
@@ -27,8 +23,8 @@ impl Robot {
     pub async fn run_plan(&mut self, plan: Vec<Action>) {
         for action in plan {
             match action {
-                Action::DriveCurve { points, b, zeta } => {
-                    self.chassis.drive_ramsete_catmull_rom(&points, 32, b, zeta).await;
+                Action::DriveCurve(points) => {
+                    self.chassis.drive_ramsete_catmull_rom(&points, 32, 0.005, 0.75).await;
                 }
                 Action::DrivePtp(points) => {
                     self.chassis.drive_ptp(&points).await;

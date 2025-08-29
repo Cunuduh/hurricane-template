@@ -2,18 +2,20 @@
 #![no_std]
 #![feature(generic_const_exprs)]
 extern crate alloc;
-use alloc::{sync::Arc, vec};
 use core::time::Duration;
 
-use control::PoseSettings;
 use vexide::{devices::smart::imu::InertialSensor, prelude::*};
 
 use crate::{
     control::{Chassis, ChassisConfig},
     odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
-    plan::Action,
 };
+use core::sync::atomic::{AtomicUsize, Ordering};
+static UI_SELECTED_ROUTE: AtomicUsize = AtomicUsize::new(0);
+use vexide::fs;
+const AUTON_SAVE_PATH: &str = "/sd/auton.txt";
+use alloc::string::ToString;
 
 mod control;
 mod odometry;
@@ -21,19 +23,62 @@ mod pid;
 mod plan;
 mod triggers;
 mod utils;
+mod routines;
+
+slint::include_modules!();
+use slint::ComponentHandle;
 
 #[vexide::main]
 async fn main(peripherals: Peripherals) {
-    let robot = Robot::new(peripherals).await;
-    robot.compete().await;
+    let (mut robot, display) = Robot::new(peripherals).await;
+    vexide_slint::initialize_slint_platform(display);
+    let ui = VexSelector::new().unwrap();
+    ui.on_route_selected(|idx| {
+        let i = idx as usize;
+        UI_SELECTED_ROUTE.store(i, Ordering::Relaxed);
+        if let Some(name) = routines::list_names().into_iter().nth(i) {
+            let _ = fs::write(AUTON_SAVE_PATH, name.as_bytes());
+        } else {
+            let _ = fs::write(AUTON_SAVE_PATH, i.to_string().as_bytes());
+        }
+    });
+    // set routes from embedded routines
+    {
+        let names = routines::list_names();
+        // convert names into slint model
+        let v: alloc::vec::Vec<slint::SharedString> = names.into_iter().map(slint::SharedString::from).collect();
+        let model = alloc::rc::Rc::new(slint::VecModel::from(v));
+        ui.set_routes(model.into());
+        // load saved selection from sd
+        if let Ok(saved) = fs::read_to_string(AUTON_SAVE_PATH) {
+            let s = saved.trim();
+            let mut sel = 0usize;
+            if !s.is_empty() {
+                // prefer name match, else treat as index
+                let list = routines::list_names();
+                if let Some(pos) = list.iter().position(|n| n.eq_ignore_ascii_case(s)) {
+                    sel = pos;
+                } else if let Ok(n) = s.parse::<usize>() {
+                    sel = n;
+                }
+                if sel >= list.len() && !list.is_empty() { sel = 0; }
+            }
+            UI_SELECTED_ROUTE.store(sel, Ordering::Relaxed);
+            ui.set_selected_route(sel as i32);
+        }
+    }
+    let _ = ui.show();
+    robot.ui = Some(ui.as_weak());
+    vexide::task::spawn(robot.compete()).detach();
 }
 
 pub struct Robot {
     chassis: Chassis<3, 3, 3>,
+    ui: Option<slint::Weak<VexSelector>>,
 }
 
 impl Robot {
-    async fn new(peripherals: Peripherals) -> Self {
+    async fn new(peripherals: Peripherals) -> (Self, Display) {
         let left_motors = [
             Motor::new(peripherals.port_1, Gearset::Blue, Direction::Reverse),
             Motor::new(peripherals.port_3, Gearset::Blue, Direction::Forward),
@@ -112,7 +157,7 @@ impl Robot {
         .await;
         
 
-        Robot { chassis }
+        (Robot { chassis, ui: None }, peripherals.display)
     }
 }
 
@@ -120,64 +165,11 @@ impl Compete for Robot {
     async fn autonomous(&mut self) {
         self.chassis.odometry.reset(Default::default());
         let _ = self.chassis.imu.reset_heading();
-
-        let drive_speed = 3.0;
-        let points: Arc<[(Pose, PoseSettings)]> = Arc::from(vec![
-            (
-                Pose::new(0.0, 0.0),
-                PoseSettings {
-                    max_voltage: drive_speed,
-                    is_reversed: false,
-                },
-            ),
-            (
-                Pose::new(12.0, 12.0),
-                PoseSettings {
-                    max_voltage: drive_speed,
-                    is_reversed: false,
-                },
-            ),
-            (
-                Pose::new(12.0, 12.0),
-                PoseSettings {
-                    max_voltage: drive_speed,
-                    is_reversed: false,
-                },
-            ),
-            (
-                Pose::with_heading(36.0, 12.0, 0.0),
-                PoseSettings {
-                    max_voltage: drive_speed,
-                    is_reversed: false,
-                },
-            ),
-        ].into_boxed_slice());
-        let plan = vec![
-            Action::DriveCurve {
-                points: points.clone(),
-                b: 0.005,
-                zeta: 0.75,
-            },
-            Action::DrivePtp(points.clone()),
-            Action::DriveToPoint(
-                Pose::new(0.0, 0.0),
-                PoseSettings {
-                    max_voltage: 6.0,
-                    is_reversed: false,
-                },
-            ),
-            Action::TurnToAngle(
-                0.0,
-                PoseSettings {
-                    max_voltage: 11.0,
-                    is_reversed: false,
-                },
-            ),
-            Action::TriggerOnDistance(
-                24.0,
-                "do something"
-            ),
-        ];
+        let routines = routines::load_all();
+        let idx = UI_SELECTED_ROUTE.load(Ordering::Relaxed);
+        if routines.is_empty() { return; }
+        let target = if idx < routines.len() { idx } else { 0 };
+        let plan = routines.into_iter().nth(target).map(|(_, p)| p).unwrap();
         self.run_plan(plan).await;
     }
 

@@ -13,4 +13,13 @@ icon = "planets"
 compress = true
 
 [dependencies]
+slint = { version = "1.12", std = false, default-features = false, features = ["compat-1-2", "libm", "renderer-software", "unsafe-single-threaded"] }
 vexide = "0.7.0"
+vexide-slint = "0.1.0"
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
+
+[build-dependencies]
+slint-build = "1.12"
+postcard = { version = "1.0", default-features = false, features = ["alloc"] }
+serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }

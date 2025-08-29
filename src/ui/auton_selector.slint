@@ -1,0 +1,147 @@
+import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+export component VexSelector inherits Window {
+    width: 480px;
+    height: 240px;
+    title: "vex autonomous selector";
+
+    in-out property <bool> is_red_alliance: true;
+    in-out property <int> selected_route: 0;
+    in-out property <[string]> routes: ["Top", "Bottom", "Skills", "Test"]; // default until set from rust
+    callback route_selected(index: int);
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: #0f172a;
+    }
+
+    HorizontalBox {
+        spacing: 0px;
+        padding: 0px;
+
+        // left panel - selector
+        Rectangle {
+            width: 210px;
+            
+            VerticalBox {
+                padding: 0px;
+                spacing: 0px;
+                alignment: start;
+
+                // alliance toggle
+                VerticalBox {
+                    spacing: 0px;
+                    alignment: LayoutAlignment.start;
+                    height: 48px;
+
+                    HorizontalBox {
+                        spacing: 8px;
+                        alignment: LayoutAlignment.center;
+
+                        Text {
+                            text: "BLUE";
+                            vertical-alignment: TextVerticalAlignment.center;
+                            color: is_red_alliance ? #475569 : #3b82f6;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+
+                        Rectangle {
+                            width: 40px;
+                            height: 20px;
+                            background: is_red_alliance ? #ef4444 : #3b82f6;
+                            border-radius: 10px;
+                            
+                            Rectangle {
+                                width: 18px;
+                                height: 18px;
+                                background: #f8fafc;
+                                border-radius: 9px;
+                                x: is_red_alliance ? 20px : 2px;
+                                y: 1px;
+                                
+                                animate x {
+                                    duration: 200ms;
+                                    easing: ease-out;
+                                }
+                            }
+
+                            TouchArea {
+                                clicked => {
+                                    is_red_alliance = !is_red_alliance;
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "RED";
+                            vertical-alignment: TextVerticalAlignment.center;
+                            color: is_red_alliance ? #ef4444 : #475569;
+                            font-size: 12px;
+                            font-weight: 600;
+                        }
+                    }
+                }
+
+                // route buttons
+                VerticalBox {
+                    spacing: 6px;
+                    alignment: start;
+
+                    for route[idx] in routes : Rectangle {
+                        height: 36px;
+                        background: selected_route == idx ? #334155 : #1e293b;
+                        border-radius: 4px;
+                        border-width: 1px;
+                        border-color: selected_route == idx ? #475569 : #334155;
+
+                        animate background {
+                            duration: 150ms;
+                        }
+
+                        HorizontalBox {
+                            padding-left: 8px;
+                            padding-right: 8px;
+                            alignment: center;
+
+                            Text {
+                                text: route;
+                                color: selected_route == idx ? #f8fafc : #cbd5e1;
+                                font-size: 10px;
+                                font-weight: 500;
+                            }
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                selected_route = idx;
+                                route_selected(idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // right panel - field preview
+        Rectangle {
+            border-width: 1px;
+            border-color: #334155;
+            VerticalBox {
+                padding: 0px;
+                alignment: start;
+
+                Image {
+                    width: 240px;
+                    height: 240px;
+                    // source: @image-url("field_preview.png");
+                    image-fit: contain;
+                }
+            }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    VexSelector { }
+}
