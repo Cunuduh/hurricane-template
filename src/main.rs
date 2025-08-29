@@ -67,9 +67,11 @@ async fn main(peripherals: Peripherals) {
             ui.set_selected_route(sel as i32);
         }
     }
-    ui.run().expect("failed to run application");
     robot.ui = Some(ui.as_weak());
     vexide::task::spawn(robot.compete()).detach();
+    ui.run().expect("failed to run application");
+
+    vexide::program::exit();
 }
 
 pub struct Robot {
