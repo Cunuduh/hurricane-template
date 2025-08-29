@@ -28,11 +28,12 @@ impl Pid {
 
     pub fn next(&mut self, error: f64, dt: f64) -> f64 {
         if self.disabled || error.abs() < self.min_error {
-            self.integral = 0.0;
+            self.reset();
             return 0.0;
         }
 
         if dt == 0.0 {
+            self.prev_error = Some(error);
             return self.kp * error + self.ki * self.integral;
         }
 
@@ -66,9 +67,5 @@ impl Pid {
         if disabled {
             self.reset();
         }
-    }
-
-    pub fn is_disabled(&self) -> bool {
-        self.disabled
     }
 }

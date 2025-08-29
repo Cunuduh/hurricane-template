@@ -20,6 +20,11 @@ Follow these steps to set up your computer for building and uploading this code 
    cd hurricane-template
    ```
 
+If you already have the code, make sure it's up to date by running this command inside the `hurricane-template` folder:
+```
+git pull
+```
+
 ## 2. Install Rust
 
 Go to [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install) and follow the instructions to install Rust.
@@ -40,7 +45,7 @@ cargo install cargo-v5
 2. Make sure you are in the folder with your code (see step 1).
 3. Build and upload the code by running:
    ```
-   cargo v5 upload
+   cargo v5 upload --release
    ```
 4. Wait for the upload to finish. The robot will be ready to run the new code in slot 1, named "Hurricanes". If the upload fails while plugged into the controller, try unplugging and replugging the USB cable. If that doesn't work, plug the robot brain directly into your computer and try again.
 

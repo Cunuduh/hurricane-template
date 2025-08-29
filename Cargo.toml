@@ -23,3 +23,9 @@ postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 slint-build = "1.12"
 postcard = { version = "1.0", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true
+codegen-units = 1

@@ -77,15 +77,13 @@ impl Odometry {
 
     pub fn update(
         &mut self,
-        left_revs: Position,
-        right_revs: Position,
-        parallel_revs: Option<Position>,
-        perpendicular_revs: Option<Position>,
+        parallel_revs: Position,
+        perpendicular_revs: Position,
         imu_heading_rad: f64,
     ) {
-        if let (Some(tw), Some(par), Some(perp)) =
-            (&self.tracking_wheels, parallel_revs, perpendicular_revs)
-        {
+        if let Some(tw) = &self.tracking_wheels {
+            let par = parallel_revs;
+            let perp = perpendicular_revs;
             let p = par.as_revolutions();
             let q = perp.as_revolutions();
 
@@ -106,35 +104,7 @@ impl Odometry {
             self.pose.y += dx_robot * self.pose.heading.sin()
                 + dy_robot * self.pose.heading.cos();
             self.pose.heading = theta;
-            return;
         }
-        let lrevs = left_revs.as_revolutions();
-        let rrevs = right_revs.as_revolutions();
-
-        let delta_lrevs = lrevs - self.prev_lrevs;
-        let delta_rrevs = rrevs - self.prev_rrevs;
-        self.prev_lrevs = lrevs;
-        self.prev_rrevs = rrevs;
-
-        let delta_wheel_lrevs = delta_lrevs / self.ext_gear_ratio;
-        let delta_wheel_rrevs = delta_rrevs / self.ext_gear_ratio;
-        let delta_ldist = delta_wheel_lrevs * self.wheel_circumference;
-        let delta_rdist = delta_wheel_rrevs * self.wheel_circumference;
-        let avg_fwd_dist = (delta_ldist + delta_rdist) / 2.0;
-
-        let delta_heading_enc = (delta_rdist - delta_ldist) / self.track_width;
-        let enc_heading = self.pose.heading + delta_heading_enc;
-        // also use imu heading
-        let imu_heading = self.normalize_angle(imu_heading_rad);
-        // fuse encoder and imu heading with complementary filter
-        // offer all weight to imu (less drift, no problem of motor slipping or scrub) until i get them odom pods
-        const ALPHA: f64 = 1.00;
-        let fused = self.normalize_angle((1.0 - ALPHA) * enc_heading + ALPHA * imu_heading);
-
-        // update pose using fused heading
-        self.pose.x += avg_fwd_dist * fused.cos();
-        self.pose.y += avg_fwd_dist * fused.sin();
-        self.pose.heading = fused;
     }
 
     pub fn pose(&self) -> Pose {

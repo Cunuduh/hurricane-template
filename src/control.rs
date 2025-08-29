@@ -213,13 +213,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     fn update_odometry(&mut self) {
-        let left_pos = self.left_motors[0].position().unwrap_or_default();
-        let right_pos = self.right_motors[0].position().unwrap_or_default();
         let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
         let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
         let imu_heading_rad = self.imu.rotation().unwrap_or_default().to_radians();
         self.odometry
-            .update(left_pos, right_pos, Some(parallel_pos), Some(perpendicular_pos), imu_heading_rad);
+            .update(parallel_pos, perpendicular_pos, imu_heading_rad);
     }
 
     fn check_stall(&mut self) -> bool {
@@ -869,15 +867,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut t0 = Instant::now();
         let mut ts: Option<Instant> = None;
         let mut tb: Option<Instant> = None;
-        let timeout = {
-            let deg = a_deg.abs().clamp(10.0, 180.0);
-            // 30 ms per deg, min 1.5s, max 6s
-            let ms = (deg * 30.0).clamp(1500.0, 6000.0);
-            Duration::from_millis(ms as u64)
-        };
-        let t_start = Instant::now();
-        const TURN_MIN_VOLTAGE: f64 = 1.5;
-        const STALL_CMD_THRESHOLD_V: f64 = 3.0;
 
         loop {
             let t = Instant::now();
@@ -894,8 +883,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let dh = self.normalize_angle(h - initial_heading);
             self.triggers.check_angle(dh.to_degrees());
             let e = self.normalize_angle(a - h);
-            if t.duration_since(t_start) >= timeout {
-                println!("turn_to_angle: timeout");
+            
+            if self.check_stall() {
+                println!("turn_to_angle: stall detected");
                 break;
             }
             
@@ -925,16 +915,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     tb = None;
                 }
             }
-            let mut u = pid.next(e, dt);
-            if e2 > 0.5 {
-                u += e.signum() * TURN_MIN_VOLTAGE;
-            }
-            u = u.clamp(-v, v);
-
-            if u.abs() >= STALL_CMD_THRESHOLD_V && self.check_stall() {
-                println!("turn_to_angle: stall detected");
-                break;
-            }
+            let u = pid.next(e, dt);
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(u); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(-u); }
         }
@@ -1004,15 +985,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut small_error_timer: Option<Instant> = None;
         let mut big_error_timer: Option<Instant> = None;
 
-        let timeout = {
-            let inches = target_dist.abs().clamp(12.0, 120.0);
-            let ms = (inches * 80.0).clamp(1500.0, 8000.0);
-            Duration::from_millis(ms as u64)
-        };
-        let t_start = Instant::now();
-        const DRIVE_MIN_VOLTAGE: f64 = 1.25;
-        const STALL_CMD_THRESHOLD_V: f64 = 3.0;
-
         loop {
             let now = Instant::now();
             let dt = now.duration_since(last_time).as_secs_f64();
@@ -1023,8 +995,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             last_time = now;
 
             self.update_odometry();
-            if now.duration_since(t_start) >= timeout {
-                println!("drive_straight: timeout");
+            if self.check_stall() {
+                println!("drive_straight: stall detected");
                 break;
             }
 
@@ -1062,20 +1034,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             }
 
-            let mut u = drive_pid.next(err, dt);
-            if err.abs() > 0.25 {
-                u += err.signum() * DRIVE_MIN_VOLTAGE;
-            }
+            let u = drive_pid.next(err, dt);
             let heading_error = self.normalize_angle(initial_heading - current.heading);
             let tc = heading_pid.next(heading_error, dt)
                 .clamp(-self.config.max_volts, self.config.max_volts);
 
             let vl = (u + tc).clamp(-max_voltage, max_voltage);
             let vr = (u - tc).clamp(-max_voltage, max_voltage);
-            if vl.abs().max(vr.abs()) >= STALL_CMD_THRESHOLD_V && self.check_stall() {
-                println!("drive_straight: stall detected");
-                break;
-            }
             for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
             for m in self.right_motors.iter_mut() { let _ = m.set_voltage(vr); }
         }
