@@ -1,5 +1,5 @@
 extern crate alloc;
-use alloc::{vec::Vec, string::String, boxed::Box};
+use alloc::{vec::Vec, string::String};
 use serde::{Deserialize, Serialize};
 
 use crate::chassis::PoseSettings;
@@ -36,19 +36,19 @@ fn map_action(a: IRAction) -> Action {
 	match a {
 		IRAction::DriveCurve(v) => {
 			let pts: Vec<(Pose, PoseSettings)> = v.into_iter().map(|(p,s)| (map_pose(p), map_settings(s))).collect();
-			Action::DriveCurve(alloc::sync::Arc::from(pts.into_boxed_slice()))
+			Action::DriveCurve(pts.into_boxed_slice())
 		}
 		IRAction::DrivePtp(v) => {
 			let pts: Vec<(Pose, PoseSettings)> = v.into_iter().map(|(p,s)| (map_pose(p), map_settings(s))).collect();
-			Action::DrivePtp(alloc::sync::Arc::from(pts.into_boxed_slice()))
+			Action::DrivePtp(pts.into_boxed_slice())
 		}
 		IRAction::DriveToPoint(p, s) => Action::DriveToPoint(map_pose(p), map_settings(s)),
 		IRAction::DriveStraight(d, s) => Action::DriveStraight(d, map_settings(s)),
 		IRAction::TurnToPoint(p, s) => Action::TurnToPoint(map_pose(p), map_settings(s)),
 		IRAction::TurnToAngle(a, s) => Action::TurnToAngle(a, map_settings(s)),
-		IRAction::TriggerOnIndex(i, n) => Action::TriggerOnIndex(i, Box::leak(n.into_boxed_str())),
-		IRAction::TriggerOnDistance(d, n) => Action::TriggerOnDistance(d, Box::leak(n.into_boxed_str())),
-		IRAction::TriggerOnAngle(a, n) => Action::TriggerOnAngle(a, Box::leak(n.into_boxed_str())),
+		IRAction::TriggerOnIndex(i, n) => Action::TriggerOnIndex(i, n),
+		IRAction::TriggerOnDistance(d, n) => Action::TriggerOnDistance(d, n),
+		IRAction::TriggerOnAngle(a, n) => Action::TriggerOnAngle(a, n),
 	}
 }
 

@@ -145,16 +145,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             quick_stop_accumulator: 0.0,
             neg_inertia_accumulator: 0.0,
             triggers: TriggerManager::new(args.triggers),
-            // initialize new intake fields
             intake_state: 0,
             prev_l1: false,
-            // initialize outtake fields
             outtake_state: 0,
             prev_r1: false,
             outtake_jam_reverse_until: None,
             outtake_initial_reverse_until: None,
-
-            // init middle outtake fields
             outtake_middle_state: 0,
             prev_r2: false,
             outtake_middle_jam_reverse_until: None,
