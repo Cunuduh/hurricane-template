@@ -1,12 +1,13 @@
 use core::{f64::consts::PI, time::Duration};
 extern crate alloc;
 use vexide::{
-    devices::{controller::Controller, smart::imu::InertialSensor},
+    devices::{controller::Controller, smart::imu::{InertialSensor, InertialError}},
     prelude::*,
     time::Instant,
 };
+use slint::SharedString;
 
-use crate::odometry::{Odometry, Pose, TrackingWheelConfig};
+use crate::{VexSelector, odometry::{Odometry, Pose, TrackingWheelConfig}};
 use crate::pid::Pid;
 use crate::triggers::TriggerManager;
 
@@ -91,12 +92,62 @@ pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub controller: Controller,
     pub config: ChassisConfig,
     pub triggers: &'static [(&'static str, fn())],
+    pub ui: slint::Weak<VexSelector>,
 }
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     pub async fn new(
         mut args: ChassisArgs<L, R, I>,
     ) -> Self {
-        let _ = args.imu.calibrate().await;
+        let ui = args.ui.clone();
+
+        if let Some(handle) = ui.upgrade() {
+            handle.set_show_progress(true);
+            handle.set_progress_value(0.0);
+            handle.set_progress_text(SharedString::from("Calibrating IMU..."));
+        }
+        {
+            let ui_anim = ui.clone();
+            vexide::task::spawn(async move {
+                let start = Instant::now();
+                let total_ms = 4000.0_f64;
+                loop {
+                    sleep(Duration::from_millis(50)).await;
+                    if let Some(h) = ui_anim.upgrade() {
+                        if !h.get_show_progress() { break; }
+                        let elapsed_ms = start.elapsed().as_millis() as f64;
+                        let pct = (elapsed_ms / total_ms * 100.0).clamp(0.0, 100.0) as f32;
+                        h.set_progress_value(pct);
+                    } else {
+                        break;
+                    }
+                }
+            }).detach();
+        }
+        match args.imu.calibrate().await {
+            Ok(_) => {
+                println!("IMU calibration successful");
+                if let Some(handle) = ui.upgrade() {
+                    handle.set_progress_text(SharedString::from("IMU calibration successful"));
+                    handle.set_progress_value(100.0);
+                }
+            }
+            Err(e) => {
+                let msg = match e {
+                    InertialError::CalibrationTimedOut => "IMU calibration timed out",
+                    InertialError::Port { .. } => "IMU not detected on the configured port",
+                    InertialError::BadStatus => "IMU failed to report status",
+                    _ => "IMU calibration error",
+                };
+                println!("{}: {:?}", msg, e);
+                if let Some(handle) = ui.upgrade() {
+                    handle.set_progress_text(SharedString::from(msg));
+                }
+                sleep(Duration::from_millis(750)).await;
+            }
+        }
+        if let Some(handle) = ui.upgrade() {
+            handle.set_show_progress(false);
+        }
 
         let _ = args.imu.reset_heading();
         let _ = args.imu.reset_rotation();

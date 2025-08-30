@@ -176,7 +176,7 @@ fn find_routine_files(dir: &Path) -> Vec<PathBuf> {
 
 fn main() {
     slint_build::compile_with_config(
-        "src/ui/auton_selector.slint",
+        "src/ui/ui.slint",
         slint_build::CompilerConfiguration::new()
             .embed_resources(slint_build::EmbedResourcesKind::EmbedForSoftwareRenderer),
     )

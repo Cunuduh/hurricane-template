@@ -33,9 +33,10 @@ use slint::ComponentHandle;
 
 #[vexide::main]
 async fn main(peripherals: Peripherals) {
-    let (mut robot, display) = Robot::new(peripherals).await;
-    vexide_slint::initialize_slint_platform(display);
+    let mut dynamic_peripherals = DynamicPeripherals::new(peripherals);
+    vexide_slint::initialize_slint_platform(dynamic_peripherals.take_display().expect("display"));
     let ui = VexSelector::new().expect("failed to create application");
+    let robot = Robot::new(&mut dynamic_peripherals, ui.as_weak()).await;
     ui.on_route_selected(|idx| {
         let i = idx as usize;
         UI_SELECTED_ROUTE.store(i, Ordering::Relaxed);
@@ -70,7 +71,6 @@ async fn main(peripherals: Peripherals) {
             ui.set_selected_route(sel as i32);
         }
     }
-    robot.ui = Some(ui.as_weak());
     vexide::task::spawn(robot.compete()).detach();
     ui.run().expect("failed to run application");
 
@@ -79,28 +79,27 @@ async fn main(peripherals: Peripherals) {
 
 pub struct Robot {
     chassis: Chassis<3, 3, 3>,
-    ui: Option<slint::Weak<VexSelector>>,
 }
 
 impl Robot {
-    async fn new(peripherals: Peripherals) -> (Self, Display) {
+    async fn new(peripherals: &mut DynamicPeripherals, ui: slint::Weak<VexSelector>) -> Self {
         let left_motors = [
-            Motor::new(peripherals.port_1, Gearset::Blue, Direction::Reverse),
-            Motor::new(peripherals.port_3, Gearset::Blue, Direction::Forward),
-            Motor::new(peripherals.port_5, Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.take_smart_port(1).expect("smart port 1"), Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.take_smart_port(3).expect("smart port 3"), Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.take_smart_port(5).expect("smart port 5"), Gearset::Blue, Direction::Reverse),
         ];
         let right_motors = [
-            Motor::new(peripherals.port_2, Gearset::Blue, Direction::Forward),
-            Motor::new(peripherals.port_4, Gearset::Blue, Direction::Reverse),
-            Motor::new(peripherals.port_6, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.take_smart_port(2).expect("smart port 2"), Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.take_smart_port(4).expect("smart port 4"), Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.take_smart_port(6).expect("smart port 6"), Gearset::Blue, Direction::Forward),
         ];
-        let imu = InertialSensor::new(peripherals.port_7);
-        let parallel_wheel = RotationSensor::new(peripherals.port_8, Direction::Forward);
-        let perpendicular_wheel = RotationSensor::new(peripherals.port_9, Direction::Forward);
+        let imu = InertialSensor::new(peripherals.take_smart_port(7).expect("smart port 7"));
+        let parallel_wheel = RotationSensor::new(peripherals.take_smart_port(8).expect("smart port 8"), Direction::Forward);
+        let perpendicular_wheel = RotationSensor::new(peripherals.take_smart_port(9).expect("smart port 9"), Direction::Forward);
         let intake_motors = [
-            Motor::new(peripherals.port_10, Gearset::Blue, Direction::Reverse),
-            Motor::new(peripherals.port_11, Gearset::Blue, Direction::Forward),
-            Motor::new(peripherals.port_12, Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.take_smart_port(10).expect("smart port 10"), Gearset::Blue, Direction::Reverse),
+            Motor::new(peripherals.take_smart_port(11).expect("smart port 11"), Gearset::Blue, Direction::Forward),
+            Motor::new(peripherals.take_smart_port(12).expect("smart port 12"), Gearset::Blue, Direction::Forward),
         ];
         let tw_config = TrackingWheelConfig {
             parallel_offset: 0.302,
@@ -150,7 +149,7 @@ impl Robot {
         ];
         let chassis = Chassis::new(
             ChassisArgs {
-                controller: peripherals.primary_controller,
+                controller: peripherals.take_primary_controller().expect("primary controller"),
                 left_motors,
                 right_motors,
                 parallel_wheel,
@@ -158,11 +157,12 @@ impl Robot {
                 intake_motors,
                 imu,
                 config,
-                triggers
+                triggers,
+                ui
             }
         ).await;
 
-        (Robot { chassis, ui: None }, peripherals.display)
+        Robot { chassis  }
     }
 }
 

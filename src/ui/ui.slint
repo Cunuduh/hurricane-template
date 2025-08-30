@@ -8,6 +8,9 @@ export component VexSelector inherits Window {
     in-out property <bool> is_red_alliance: true;
     in-out property <int> selected_route: 0;
     in-out property <[string]> routes: ["Top", "Bottom", "Skills", "Test"]; // default until set from rust
+    in-out property <bool> show_progress: false;
+    in-out property <float> progress_value: 0.0; // 0.0 to 100.0
+    in-out property <string> progress_text: "Calibrating IMU...";
     callback route_selected(index: int);
     Rectangle {
         width: parent.width;
@@ -130,6 +133,62 @@ export component VexSelector inherits Window {
                     height: 240px;
                     // source: @image-url("field_preview.png");
                     image-fit: contain;
+                }
+            }
+        }
+    }
+    if show_progress : Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: rgba(0, 0, 0, 0.7); // semi-transparent overlay
+        
+        Rectangle {
+            width: 280px;
+            height: 80px;
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: #1e293b;
+            border-radius: 12px;
+            border-width: 1px;
+            border-color: #334155;
+
+            TouchArea {
+                width: 480px;
+                height: 240px;
+                clicked => {
+                    // consume clicks to prevent interaction with underlying UI
+                }
+            }
+
+            VerticalBox {
+                padding: 16px;
+                spacing: 12px;
+                alignment: center;
+                
+                Text {
+                    text: progress_text;
+                    color: #f8fafc;
+                    font-size: 11px;
+                    horizontal-alignment: center;
+                }
+                
+                Rectangle {
+                    width: parent.width - 32px;
+                    height: 6px;
+                    background: #334155;
+                    border-radius: 3px;
+                    HorizontalBox {
+                        padding: 0px;
+                        spacing: 0px;
+                        alignment: start;
+                        Rectangle {
+                            width: parent.width * (progress_value / 100.0);
+                            height: parent.height;
+                            background: #3b82f6;
+                            border-radius: 3px;
+                        
+                        }
+                    }
                 }
             }
         }
