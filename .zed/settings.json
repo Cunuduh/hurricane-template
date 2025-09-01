@@ -1,0 +1,27 @@
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "check": {
+          "targets": ["./armv7a-vex-v5.json"],
+          "allTargets": false,
+          "command": "clippy"
+        },
+        "cargo": {
+          "target": "./armv7a-vex-v5.json",
+          "features": "all",
+          "buildScripts": {
+            "enable": true
+          }
+        },
+        "diagnostics": {
+          "disabled": ["unresolved-proc-macro"],
+          "warningsAsHint": ["dead_code", "unused_variables", "unused_imports", "too_many_arguments"]
+        },
+        "procMacro": {
+          "enable": true
+        }
+      }
+    }
+  }
+}
