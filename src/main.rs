@@ -27,6 +27,7 @@ mod plan;
 mod triggers;
 mod utils;
 mod routines;
+mod motion_controller;
 
 slint::include_modules!();
 use slint::ComponentHandle;
@@ -140,7 +141,7 @@ impl Robot {
             stall_time: Duration::from_millis(400),
 
             accel_t: 0.5,
-            tw_config: Some(tw_config),
+            tw_config,
         };
         let triggers: &'static [(&'static str, fn())] = &[
             ("do something", || {

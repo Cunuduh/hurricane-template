@@ -9,6 +9,8 @@ use vexide::{
 
 use crate::{chassis::PoseSettings, odometry::Pose};
 use crate::utils::path::interpolate_catmull_rom;
+use crate::utils::normalize_angle;
+use crate::motion_controller::{ProfilePoint, compute_motion_profile};
 
 struct Segment {
     delta_h: f64,
@@ -16,146 +18,16 @@ struct Segment {
     w_d: f64,
 }
 
-struct Profile {
-    profile_points: Vec<ProfilePoint>,
-    times: Vec<f64>,
-    total_time: f64,
-}
-
-#[derive(Copy, Clone, Debug)]
-struct ProfilePoint {
-    point: Pose,
-    distance: f64,
-    curvature: f64,
-    velocity: f64,
-    is_reversed: bool,
-    max_speed: f64,
-}
-
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
-        pub async fn drive_ptp(
-        &mut self,
-        points: &[(Pose, PoseSettings)],
+    pub async fn drive_ptp(
+    &mut self,
+    points: &[(Pose, PoseSettings)],
     ) {
         for (i, (pose, settings)) in points.iter().enumerate() {
             self.drive_to_point(pose.x, pose.y, *settings)
                 .await;
             self.triggers.check_index(i);
         }
-    }
-    fn create_motion_profile(&self, interpolated_path: Vec<(Pose, PoseSettings)>, raw_waypoints: &[(Pose, PoseSettings)]) -> Profile {
-        let path_points = interpolated_path.iter().map(|p| p.0).collect::<Vec<_>>();
-        let m = path_points.len();
-        let mut profile_points = Vec::with_capacity(m);
-
-        if m == 0 {
-            return Profile {
-                profile_points,
-                times: Vec::new(),
-                total_time: 0.0,
-            };
-        }
-        
-        let mut cum_d = 0.0;
-        profile_points.push(ProfilePoint { 
-            point: path_points[0], 
-            distance: 0.0, 
-            curvature: 0.0, 
-            velocity: 0.0, 
-            is_reversed: raw_waypoints[0].1.is_reversed, 
-            max_speed: raw_waypoints[0].1.max_voltage 
-        });
-        
-        for i in 1..m {
-            let d = (path_points[i].x - path_points[i-1].x).hypot(path_points[i].y - path_points[i-1].y);
-            cum_d += d;
-            let raw_idx_for_props = ((i * (raw_waypoints.len() - 1)) / (m - 1)).min(raw_waypoints.len() - 1);
-            profile_points.push(ProfilePoint { 
-                point: path_points[i], 
-                distance: cum_d, 
-                curvature: 0.0, 
-                velocity: 0.0, 
-                is_reversed: raw_waypoints[raw_idx_for_props].1.is_reversed, 
-                max_speed: raw_waypoints[raw_idx_for_props].1.max_voltage 
-            });
-        }
-        
-        profile_points.iter_mut().filter(|p| p.is_reversed).for_each(|p| {
-            p.point.heading += PI;
-            p.point.heading = self.normalize_angle(p.point.heading);
-        });
-
-        // compute curvature as |Δθ|/Δs using centered difference
-        for i in 1..(m-1) {
-            let h_prev = profile_points[i-1].point.heading;
-            let h_next = profile_points[i+1].point.heading;
-            let d_prev = profile_points[i].distance - profile_points[i-1].distance;
-            let d_next = profile_points[i+1].distance - profile_points[i].distance;
-            let ds = d_prev + d_next;
-            if d_prev > 1e-9 && d_next > 1e-9 && ds > 1e-9 {
-                let dtheta = self.normalize_angle(h_next - h_prev).abs();
-                profile_points[i].curvature = dtheta / ds;
-            }
-        }
-
-        let w_circ = self.config.wheel_diameter * PI;
-        let rpm = self.motor_free_rpm / self.config.ext_gear_ratio;
-        let max_v = (rpm / 60.0) * w_circ;
-        let max_a = max_v / self.config.accel_t;
-        let k = 2.0;
-        
-        for p in profile_points.iter_mut() {
-            let point_max_v = (p.max_speed / self.config.max_volts) * max_v;
-            let mut v = point_max_v;
-            if p.curvature > 1e-6 {
-                let v_k_curv_limit = k / p.curvature;
-                v = v.min(v_k_curv_limit);
-            }
-            p.velocity = v;
-        }
-        
-        for i in 0..(m - 1) {
-            let d = profile_points[i+1].distance - profile_points[i].distance;
-            if d < 1e-9 {
-                profile_points[i+1].velocity = profile_points[i+1].velocity.min(profile_points[i].velocity);
-                continue;
-            }
-            let vf = profile_points[i].velocity.powi(2) + 2.0 * max_a * d;
-            if vf >= 0.0 {
-                profile_points[i+1].velocity = profile_points[i+1].velocity.min(vf.sqrt());
-            } else {
-                profile_points[i+1].velocity = profile_points[i+1].velocity.min(0.0);
-            }
-        }
-        profile_points[0].velocity = 0.0;
-        profile_points[m-1].velocity = 0.0;
-        
-        for i in (0..(m-1)).rev() {
-            let d = profile_points[i+1].distance - profile_points[i].distance;
-            if d < 1e-9 {
-                profile_points[i].velocity = profile_points[i].velocity.min(profile_points[i+1].velocity);
-                continue;
-            }
-            let vf_old = profile_points[i+1].velocity.powi(2) + 2.0 * max_a * d;
-            if vf_old >= 0.0 {
-                profile_points[i].velocity = profile_points[i].velocity.min(vf_old.sqrt());
-            } else {
-                profile_points[i].velocity = profile_points[i].velocity.min(0.0);
-            }
-        }
-
-        let mut times = Vec::with_capacity(m);
-        times.push(0.0);
-        for i in 1..m {
-            let d = profile_points[i].distance - profile_points[i - 1].distance;
-            let v_prev = profile_points[i - 1].velocity.max(1e-6);
-            let v_curr = profile_points[i].velocity.max(1e-6);
-            let v_avg = 0.5 * (v_prev + v_curr);
-            times.push(times[i - 1] + d / v_avg);
-        }
-        let total_time = *times.last().unwrap_or(&0.0);
-
-        Profile { profile_points, times, total_time }
     }
     pub async fn drive_ramsete_catmull_rom(
         &mut self,
@@ -165,7 +37,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         zeta: f64,
     ) {
         let interpolated_path = interpolate_catmull_rom(path_waypoints, steps);
-        let initialized_profile = self.create_motion_profile(interpolated_path, path_waypoints);
+        let initialized_profile = compute_motion_profile::<L, R, I>(self, interpolated_path, path_waypoints);
         let profile = initialized_profile.profile_points;
         let times = initialized_profile.times;
         let total_time = initialized_profile.total_time;
@@ -192,7 +64,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let p0_h = profile[i].point.heading;
             let p1_h = profile[i+1].point.heading;
             
-            let current_delta_h = self.normalize_angle(p1_h - p0_h);
+            let current_delta_h = normalize_angle(p1_h - p0_h);
             let delta_t = times[i+1] - times[i];
             
             let w_d = if delta_t.abs() < 1e-9 {
@@ -306,7 +178,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let y_d = p0.y + (p1.y - p0.y) * tau;
             
             let mut heading_d = p0_heading + seg_data.delta_h * tau;
-            heading_d = self.normalize_angle(heading_d);
+            heading_d = normalize_angle(heading_d);
             
             let v0 = profile[i].velocity;
             let v1 = profile[i + 1].velocity;
@@ -322,7 +194,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let dy = y_d - pose.y;
             let e_x = dx * pose.heading.cos() + dy * pose.heading.sin();
             let e_y = -dx * pose.heading.sin() + dy * pose.heading.cos();
-            let e_theta = self.normalize_angle(heading_d - pose.heading);
+            let e_theta = normalize_angle(heading_d - pose.heading);
 
             let k = 2.0 * zeta * (w_d * w_d + b * v_d * v_d).sqrt();
             let v = v_d * e_theta.cos() + k * e_x;
@@ -361,7 +233,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             (target_y - pose_before_turn.y).atan2(target_x - pose_before_turn.x);
 
         let target_orientation = if settings.is_reversed {
-            self.normalize_angle(angle_to_target + PI)
+            normalize_angle(angle_to_target + PI)
         } else {
             angle_to_target
         };
@@ -398,7 +270,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut pid = self.config.turn_pid;
         pid.reset();
         self.stall_timer = None;
-        let a = self.normalize_angle(a_deg.to_radians());
+        let a = normalize_angle(a_deg.to_radians());
         let initial_heading = self.odometry.pose().heading;
         let mut t0 = Instant::now();
         let mut ts: Option<Instant> = None;
@@ -416,9 +288,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             self.update_odometry();
             let h = self.odometry.pose().heading;
-            let dh = self.normalize_angle(h - initial_heading);
+            let dh = normalize_angle(h - initial_heading);
             self.triggers.check_angle(dh.to_degrees());
-            let e = self.normalize_angle(a - h);
+            let e = normalize_angle(a - h);
             
             if self.check_stall() {
                 println!("turn_to_angle: stall detected");
@@ -482,7 +354,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             let imu_start = 0.0;
             let imu_end = self.imu.rotation().unwrap_or_default().to_radians();
-            let t_delta = self.normalize_angle(imu_end - imu_start);
+            let t_delta = normalize_angle(imu_end - imu_start);
 
             let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
             let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
@@ -490,7 +362,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let parallel_delta = parallel_pos.as_revolutions();
             let perpendicular_delta = perpendicular_pos.as_revolutions();
 
-            let wheel_circumference = self.config.tw_config.as_ref().unwrap().wheel_diameter * core::f64::consts::PI;
+            let wheel_circumference = self.config.tw_config.wheel_diameter * core::f64::consts::PI;
 
             let parallel_distance = parallel_delta * wheel_circumference;
             let perpendicular_distance = perpendicular_delta * wheel_circumference;
@@ -571,7 +443,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
 
             let u = drive_pid.next(err, dt);
-            let heading_error = self.normalize_angle(initial_heading - current.heading);
+            let heading_error = normalize_angle(initial_heading - current.heading);
             let tc = heading_pid.next(heading_error, dt)
                 .clamp(-self.config.max_volts, self.config.max_volts);
 

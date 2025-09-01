@@ -54,33 +54,20 @@ pub struct TrackingWheelConfig {
 
 pub struct Odometry {
     pose: Pose,
-    prev_lrevs: f64,
-    prev_rrevs: f64,
-    prev_parallel_revs: Option<f64>,
-    prev_perpendicular_revs: Option<f64>,
-    wheel_circumference: f64,
-    track_width: f64,
-    ext_gear_ratio: f64,
-    tracking_wheels: Option<TrackingWheelConfig>,
+    prev_parallel_revs: f64,
+    prev_perpendicular_revs: f64,
+    tracking_wheels: TrackingWheelConfig,
 }
 
 impl Odometry {
     pub fn new(
         initial_pose: Pose,
-        wheel_diameter: f64,
-        track_width: f64,
-        ext_gear_ratio: f64,
-        tracking_wheels: Option<TrackingWheelConfig>,
+        tracking_wheels: TrackingWheelConfig,
     ) -> Self {
         Self {
             pose: initial_pose,
-            prev_lrevs: 0.0,
-            prev_rrevs: 0.0,
-            prev_parallel_revs: None,
-            prev_perpendicular_revs: None,
-            wheel_circumference: wheel_diameter * PI,
-            track_width,
-            ext_gear_ratio,
+            prev_parallel_revs: 0.0,
+            prev_perpendicular_revs: 0.0,
             tracking_wheels,
         }
     }
@@ -91,30 +78,28 @@ impl Odometry {
         perpendicular_revs: Position,
         imu_heading_rad: f64,
     ) {
-        if let Some(tw) = &self.tracking_wheels {
-            let par = parallel_revs;
-            let perp = perpendicular_revs;
-            let p = par.as_revolutions();
-            let q = perp.as_revolutions();
+        let par = parallel_revs;
+        let perp = perpendicular_revs;
+        let p = par.as_revolutions();
+        let q = perp.as_revolutions();
 
-            let dp = (p - self.prev_parallel_revs.unwrap_or(p)) * tw.wheel_diameter * PI;
-            let ds = (q - self.prev_perpendicular_revs.unwrap_or(q)) * tw.wheel_diameter * PI;
+        let dp = (p - self.prev_parallel_revs) * self.tracking_wheels.wheel_diameter * PI;
+        let ds = (q - self.prev_perpendicular_revs) * self.tracking_wheels.wheel_diameter * PI;
 
-            self.prev_parallel_revs = Some(p);
-            self.prev_perpendicular_revs = Some(q);
+        self.prev_parallel_revs = p;
+        self.prev_perpendicular_revs = q;
 
-            let theta = self.normalize_angle(imu_heading_rad);
-            let dtheta = self.normalize_angle(theta - self.pose.heading);
-            // compensate rotation-induced wheel travel
-            let dx_robot = dp - dtheta * tw.perpendicular_offset;
-            let dy_robot = ds + dtheta * tw.parallel_offset;
+        let theta = self.normalize_angle(imu_heading_rad);
+        let dtheta = self.normalize_angle(theta - self.pose.heading);
+        // compensate rotation-induced wheel travel
+        let dx_robot = dp - dtheta * self.tracking_wheels.perpendicular_offset;
+        let dy_robot = ds + dtheta * self.tracking_wheels.parallel_offset;
 
-            self.pose.x += dx_robot * self.pose.heading.cos()
-                - dy_robot * self.pose.heading.sin();
-            self.pose.y += dx_robot * self.pose.heading.sin()
-                + dy_robot * self.pose.heading.cos();
-            self.pose.heading = theta;
-        }
+        self.pose.x += dx_robot * self.pose.heading.cos()
+            - dy_robot * self.pose.heading.sin();
+        self.pose.y += dx_robot * self.pose.heading.sin()
+            + dy_robot * self.pose.heading.cos();
+        self.pose.heading = theta;
     }
 
     pub fn pose(&self) -> Pose {
@@ -122,8 +107,8 @@ impl Odometry {
     }
     pub fn reset(&mut self, pose: Pose) {
         self.pose = pose;
-        self.prev_lrevs = 0.0;
-        self.prev_rrevs = 0.0;
+        self.prev_parallel_revs = 0.0;
+        self.prev_perpendicular_revs = 0.0;
     }
 
     fn normalize_angle(&self, mut angle: f64) -> f64 {

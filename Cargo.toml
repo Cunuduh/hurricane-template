@@ -13,19 +13,19 @@ icon = "planets"
 compress = true
 
 [dependencies]
-slint = { version = "1.12", std = false, default-features = false, features = ["compat-1-2", "libm", "renderer-software", "unsafe-single-threaded"] }
+slint = { version = "1.12.1", std = false, default-features = false, features = ["compat-1-2", "libm", "renderer-software", "unsafe-single-threaded"] }
 vexide = "0.7.0"
 vexide-slint = "0.1.0"
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
-postcard = { version = "1.0", default-features = false, features = ["alloc"] }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 
 [build-dependencies]
 slint-build = "1.12"
-postcard = { version = "1.0", default-features = false, features = ["alloc"] }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 serde = { version = "1.0", default-features = false, features = ["alloc", "derive"] }
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 strip = true
 lto = true
 codegen-units = 1

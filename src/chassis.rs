@@ -1,4 +1,4 @@
-use core::{f64::consts::PI, time::Duration};
+use core::time::Duration;
 extern crate alloc;
 use vexide::{
     devices::{controller::Controller, smart::imu::{InertialSensor, InertialError}},
@@ -51,7 +51,7 @@ pub struct ChassisConfig {
     
     pub accel_t: f64,
 
-    pub tw_config: Option<TrackingWheelConfig>,
+    pub tw_config: TrackingWheelConfig,
 }
 
 pub struct Chassis<const L: usize, const R: usize, const I: usize> {
@@ -167,9 +167,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let _ = args.perpendicular_wheel.reset_position();
         let odometry = Odometry::new(
             args.config.initial_pose,
-            args.config.wheel_diameter,
-            args.config.track_width,
-            args.config.ext_gear_ratio,
             args.config.tw_config,
         );
         let motor_free_rpm = match args.left_motors[0].gearset() {
@@ -207,15 +204,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             outtake_middle_jam_reverse_until: None,
             outtake_middle_initial_reverse_until: None,
         }
-    }
-    pub fn normalize_angle(&self, mut angle: f64) -> f64 {
-        while angle > PI {
-            angle -= 2.0 * PI;
-        }
-        while angle < -PI {
-            angle += 2.0 * PI;
-        }
-        angle
     }
 
     pub fn update_odometry(&mut self) {

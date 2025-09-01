@@ -1,9 +1,16 @@
 use std::{env, fs, io::Write, path::{Path, PathBuf}};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct IRPose { x: f64, y: f64, heading: Option<f64> }
+struct IRPose {
+    x: f64,
+    y: f64,
+    heading: Option<f64>,
+}
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct IRPoseSettings { is_reversed: bool, max_voltage: f64 }
+struct IRPoseSettings {
+    is_reversed: bool,
+    max_voltage: f64,
+}
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum IRAction {
     DriveCurve(Vec<(IRPose, IRPoseSettings)>),
@@ -17,7 +24,10 @@ enum IRAction {
     TriggerOnAngle(f64, String),
 }
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
-struct IRRoutine { name: String, actions: Vec<IRAction> }
+struct IRRoutine {
+    name: String,
+    actions: Vec<IRAction>,
+}
 
 fn parse_number(s: &str) -> f64 {
     s.trim().parse::<f64>().expect("invalid number")
@@ -42,7 +52,10 @@ fn parse_tuple(s: &str) -> (f64, f64, Option<f64>) {
 }
 
 fn parse_attrs(mut rest: &str) -> IRPoseSettings {
-    let mut settings = IRPoseSettings { is_reversed: false, max_voltage: 12.0 };
+    let mut settings = IRPoseSettings {
+        is_reversed: false,
+        max_voltage: 12.0,
+    };
     while let Some(idx) = rest.find('=') {
         let (key_part, value_rest) = rest.split_at(idx);
         let key = key_part.split_whitespace().last().unwrap_or("");
@@ -55,28 +68,36 @@ fn parse_attrs(mut rest: &str) -> IRPoseSettings {
             "reverse" => settings.is_reversed = parse_bool(value),
             _ => {}
         }
-        if end.is_none() { break; }
-        rest = &value_and_more[end_idx+1..];
+        if end.is_none() {
+            break;
+        }
+        rest = &value_and_more[end_idx + 1..];
     }
     settings
 }
 
 fn parse_routine(name: &str, content: &str) -> IRRoutine {
-    let mut lines = content.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with('#')).peekable();
+    let mut lines = content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .peekable();
     let mut actions: Vec<IRAction> = Vec::new();
 
     while let Some(line) = lines.next() {
         if line.starts_with("drive_curve") {
             let mut points: Vec<(IRPose, IRPoseSettings)> = Vec::new();
             while let Some(peek) = lines.peek() {
-                if !peek.starts_with("point") { break; }
+                if !peek.starts_with("point") {
+                    break;
+                }
                 let l = lines.next().unwrap();
                 let after = l.trim_start_matches("point").trim();
                 let lp = after.find('(').expect("point (");
                 let rp = after.find(')').expect(")");
                 let tuple_str = &after[lp..=rp];
                 let (x, y, h) = parse_tuple(tuple_str);
-                let rest = &after[rp+1..];
+                let rest = &after[rp + 1..];
                 let s = parse_attrs(rest);
                 let pose = IRPose { x, y, heading: h };
                 points.push((pose, s));
@@ -85,25 +106,30 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
         } else if line.starts_with("drive_ptp") {
             let mut points: Vec<(IRPose, IRPoseSettings)> = Vec::new();
             while let Some(peek) = lines.peek() {
-                if !peek.starts_with("point") { break; }
+                if !peek.starts_with("point") {
+                    break;
+                }
                 let l = lines.next().unwrap();
                 let after = l.trim_start_matches("point").trim();
                 let lp = after.find('(').expect("point (");
                 let rp = after.find(')').expect(")");
                 let tuple_str = &after[lp..=rp];
                 let (x, y, h) = parse_tuple(tuple_str);
-                let rest = &after[rp+1..];
+                let rest = &after[rp + 1..];
                 let s = parse_attrs(rest);
                 let pose = IRPose { x, y, heading: h };
                 points.push((pose, s));
             }
             actions.push(IRAction::DrivePtp(points));
-        } else if line.starts_with("drive_to ") || line.starts_with("drive_to(") || line.starts_with("drive_to\t") {
+        } else if line.starts_with("drive_to ")
+            || line.starts_with("drive_to(")
+            || line.starts_with("drive_to\t")
+        {
             let after = line.trim_start_matches("drive_to").trim();
             let lp = after.find('(').expect("(");
             let rp = after.find(')').expect(")");
             let (x, y, h) = parse_tuple(&after[lp..=rp]);
-            let rest = &after[rp+1..];
+            let rest = &after[rp + 1..];
             let s = parse_attrs(rest);
             let pose = IRPose { x, y, heading: h };
             actions.push(IRAction::DriveToPoint(pose, s));
@@ -113,14 +139,20 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             let dist_str = parts.next().unwrap_or("");
             let s = parse_attrs(parts.next().unwrap_or(""));
             let mut dist = parse_number(dist_str);
-            if s.is_reversed { dist = -dist; }
+            if s.is_reversed {
+                dist = -dist;
+            }
             actions.push(IRAction::DriveStraight(dist, s));
         } else if line.starts_with("turn_to_point") || line.starts_with("turn_to ") {
-            let after = line.trim_start_matches("turn_to_point").trim().trim_start_matches("turn_to").trim();
+            let after = line
+                .trim_start_matches("turn_to_point")
+                .trim()
+                .trim_start_matches("turn_to")
+                .trim();
             let lp = after.find('(').expect("(");
             let rp = after.find(')').expect(")");
             let (x, y, h) = parse_tuple(&after[lp..=rp]);
-            let rest = &after[rp+1..];
+            let rest = &after[rp + 1..];
             let s = parse_attrs(rest);
             let pose = IRPose { x, y, heading: h };
             actions.push(IRAction::TurnToPoint(pose, s));
@@ -156,7 +188,10 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
         }
     }
 
-    IRRoutine { name: name.to_string(), actions }
+    IRRoutine {
+        name: name.to_string(),
+        actions,
+    }
 }
 
 fn find_routine_files(dir: &Path) -> Vec<PathBuf> {
@@ -166,7 +201,10 @@ fn find_routine_files(dir: &Path) -> Vec<PathBuf> {
             let p = e.path();
             if p.extension().and_then(|s| s.to_str()) == Some("routine") {
                 if let Some(name) = p.file_name().and_then(|s| s.to_str())
-                    && (name.starts_with('.') || name.starts_with("._")) { continue; }
+                    && (name.starts_with('.') || name.starts_with("._"))
+                {
+                    continue;
+                }
                 res.push(p);
             }
         }
