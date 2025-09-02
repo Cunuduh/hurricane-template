@@ -1,15 +1,21 @@
 use core::time::Duration;
 extern crate alloc;
+use slint::SharedString;
 use vexide::{
-    devices::{controller::Controller, smart::imu::{InertialSensor, InertialError}},
+    devices::{
+        controller::Controller,
+        smart::imu::{InertialError, InertialSensor},
+    },
     prelude::*,
     time::Instant,
 };
-use slint::SharedString;
 
-use crate::{VexSelector, odometry::{Odometry, Pose, TrackingWheelConfig}};
-use crate::pid::Pid;
-use crate::triggers::TriggerManager;
+use crate::{
+    VexSelector,
+    odometry::{Odometry, Pose, TrackingWheelConfig},
+    pid::Pid,
+    triggers::TriggerManager,
+};
 
 #[derive(Copy, Clone, Debug)]
 pub struct PoseSettings {
@@ -48,7 +54,7 @@ pub struct ChassisConfig {
     pub stall_current_threshold: f64,
     pub stall_velocity_threshold: f64,
     pub stall_time: Duration,
-    
+
     pub accel_t: f64,
 
     pub tw_config: TrackingWheelConfig,
@@ -81,6 +87,11 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub prev_r2: bool,
     pub outtake_middle_jam_reverse_until: Option<Instant>,
     pub outtake_middle_initial_reverse_until: Option<Instant>,
+    pub scraper: AdiDigitalOut,
+    pub hood: AdiDigitalOut,
+    pub colour_sort: AdiDigitalOut,
+    pub optical_sensor: OpticalSensor,
+    pub indexer_run_until: Option<Instant>,
 }
 pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
@@ -89,15 +100,17 @@ pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub perpendicular_wheel: RotationSensor,
     pub intake_motors: [Motor; I],
     pub imu: InertialSensor,
+    pub optical_sensor: OpticalSensor,
+    pub scraper: AdiDigitalOut,
+    pub hood: AdiDigitalOut,
+    pub colour_sort: AdiDigitalOut,
     pub controller: Controller,
     pub config: ChassisConfig,
     pub triggers: &'static [(&'static str, fn())],
     pub ui: slint::Weak<VexSelector>,
 }
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
-    pub async fn new(
-        mut args: ChassisArgs<L, R, I>,
-    ) -> Self {
+    pub async fn new(mut args: ChassisArgs<L, R, I>) -> Self {
         let ui = args.ui.clone();
 
         if let Some(handle) = ui.upgrade() {
@@ -113,7 +126,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 loop {
                     sleep(Duration::from_millis(50)).await;
                     if let Some(h) = ui_anim.upgrade() {
-                        if !h.get_show_progress() { break; }
+                        if !h.get_show_progress() {
+                            break;
+                        }
                         let elapsed_ms = start.elapsed().as_millis() as f64;
                         let pct = (elapsed_ms / total_ms * 100.0).clamp(0.0, 100.0) as f32;
                         h.set_progress_value(pct);
@@ -121,7 +136,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                         break;
                     }
                 }
-            }).detach();
+            })
+            .detach();
         }
         match args.imu.calibrate().await {
             Ok(_) => {
@@ -151,8 +167,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         let _ = args.imu.reset_heading();
         let _ = args.imu.reset_rotation();
-        let _ = args.imu.set_rotation(args.config.initial_pose.heading.to_degrees());
-
+        let _ = args
+            .imu
+            .set_rotation(args.config.initial_pose.heading.to_degrees());
 
         for m in args.left_motors.iter_mut() {
             let _ = m.reset_position();
@@ -165,17 +182,17 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
         let _ = args.parallel_wheel.reset_position();
         let _ = args.perpendicular_wheel.reset_position();
-        let odometry = Odometry::new(
-            args.config.initial_pose,
-            args.config.tw_config,
-        );
+        let odometry = Odometry::new(args.config.initial_pose, args.config.tw_config);
         let motor_free_rpm = match args.left_motors[0].gearset() {
             Ok(Gearset::Blue) => 600.0,
             Ok(Gearset::Green) => 200.0,
             Ok(Gearset::Red) => 100.0,
             Err(_) => 600.0,
         };
-
+        let _ = args.scraper.set_low();
+        let _ = args.hood.set_low();
+        let _ = args.colour_sort.set_low();
+        let _ = args.optical_sensor.set_led_brightness(1.0);
         Self {
             left_motors: args.left_motors,
             right_motors: args.right_motors,
@@ -203,6 +220,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             prev_r2: false,
             outtake_middle_jam_reverse_until: None,
             outtake_middle_initial_reverse_until: None,
+            scraper: args.scraper,
+            hood: args.hood,
+            colour_sort: args.colour_sort,
+            optical_sensor: args.optical_sensor,
+            indexer_run_until: None,
         }
     }
 
@@ -243,9 +265,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 self.stall_timer = Some(Instant::now());
             }
             if let Some(timer) = self.stall_timer
-                && timer.elapsed() >= self.config.stall_time {
-                    return true;
-                }
+                && timer.elapsed() >= self.config.stall_time
+            {
+                return true;
+            }
         } else {
             self.stall_timer = None;
         }
