@@ -1,16 +1,17 @@
-use super::chassis::Chassis;
 use core::{f64::consts::PI, time::Duration};
+
+use super::chassis::Chassis;
 extern crate alloc;
 use alloc::vec::Vec;
-use vexide::{
-    prelude::*,
-    time::Instant,
-};
 
-use crate::{chassis::PoseSettings, odometry::Pose};
-use crate::utils::path::interpolate_catmull_rom;
-use crate::utils::normalize_angle;
-use crate::motion_controller::{ProfilePoint, compute_motion_profile};
+use vexide::{prelude::*, time::Instant};
+
+use crate::{
+    chassis::PoseSettings,
+    motion_controller::{ProfilePoint, compute_motion_profile},
+    odometry::Pose,
+    utils::{normalize_angle, path::interpolate_catmull_rom},
+};
 
 struct Segment {
     delta_h: f64,
@@ -19,13 +20,9 @@ struct Segment {
 }
 
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
-    pub async fn drive_ptp(
-    &mut self,
-    points: &[(Pose, PoseSettings)],
-    ) {
+    pub async fn drive_ptp(&mut self, points: &[(Pose, PoseSettings)]) {
         for (i, (pose, settings)) in points.iter().enumerate() {
-            self.drive_to_point(pose.x, pose.y, *settings)
-                .await;
+            self.drive_to_point(pose.x, pose.y, *settings).await;
             self.triggers.check_index(i);
         }
     }
@@ -37,12 +34,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         zeta: f64,
     ) {
         let interpolated_path = interpolate_catmull_rom(path_waypoints, steps);
-        let initialized_profile = compute_motion_profile::<L, R, I>(self, interpolated_path, path_waypoints);
+        let initialized_profile =
+            compute_motion_profile::<L, R, I>(self, interpolated_path, path_waypoints);
         let profile = initialized_profile.profile_points;
         let times = initialized_profile.times;
         let total_time = initialized_profile.total_time;
-        
-        self.execute_ramsete_profile(profile, times, total_time, b, zeta, steps).await;
+
+        self.execute_ramsete_profile(profile, times, total_time, b, zeta, steps)
+            .await;
     }
 
     async fn execute_ramsete_profile(
@@ -62,16 +61,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut segments = Vec::<Segment>::with_capacity(m - 1);
         for i in 0..(m - 1) {
             let p0_h = profile[i].point.heading;
-            let p1_h = profile[i+1].point.heading;
-            
+            let p1_h = profile[i + 1].point.heading;
+
             let current_delta_h = normalize_angle(p1_h - p0_h);
-            let delta_t = times[i+1] - times[i];
-            
-            let w_d = if delta_t.abs() < 1e-9 {
-                if current_delta_h.abs() < 1e-9 { 0.0 } else { current_delta_h * 1e9 }
-            } else {
-                current_delta_h / delta_t
-            };
+            let delta_t = times[i + 1] - times[i];
+
+            let w_d = current_delta_h / delta_t;
             segments.push(Segment {
                 delta_h: current_delta_h,
                 t: delta_t,
@@ -87,7 +82,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut seg_i = 0;
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
-        let safety_timeout = Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(1500));
+        let safety_timeout =
+            Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(1500));
 
         loop {
             let now = Instant::now();
@@ -103,23 +99,24 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 println!("ramsete: timeout");
                 break;
             }
-            
+
             let current = self.odometry.pose();
             let goal = profile.last().unwrap().point;
             let dx_end = goal.x - current.x;
             let dy_end = goal.y - current.y;
             let dist_err = dx_end.hypot(dy_end);
-            
+
             if dist_err <= self.config.small_drive_exit_error {
                 big_timer = None;
                 if small_timer.is_none() {
                     small_timer = Some(Instant::now());
                 }
                 if let Some(t) = small_timer
-                    && t.elapsed() >= self.config.small_drive_settle_time {
-                        println!("ramsete: done (small error)");
-                        break;
-                    }
+                    && t.elapsed() >= self.config.small_drive_settle_time
+                {
+                    println!("ramsete: done (small error)");
+                    break;
+                }
             } else {
                 small_timer = None;
                 if dist_err <= self.config.big_drive_exit_error {
@@ -127,15 +124,16 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                         big_timer = Some(Instant::now());
                     }
                     if let Some(t) = big_timer
-                        && t.elapsed() >= self.config.big_drive_settle_time {
-                            println!("ramsete: done (big error)");
-                            break;
-                        }
+                        && t.elapsed() >= self.config.big_drive_settle_time
+                    {
+                        println!("ramsete: done (big error)");
+                        break;
+                    }
                 } else {
                     big_timer = None;
                 }
             }
-            
+
             if elapsed >= total_time {
                 println!("ramsete: done (timeout)");
                 break;
@@ -152,7 +150,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 } else {
                     i / steps
                 };
-                
+
                 if Some(wp_idx) != last_wp && wp_idx > 0 {
                     self.triggers.check_index(wp_idx);
                     last_wp = Some(wp_idx);
@@ -171,24 +169,21 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 (((elapsed - t0) / seg_data.t).clamp(0.0, 1.0), seg_data.w_d)
             };
 
-            let traveled = profile[i].distance + (profile[i+1].distance - profile[i].distance) * tau;
+            let traveled =
+                profile[i].distance + (profile[i + 1].distance - profile[i].distance) * tau;
             self.triggers.check_distance(traveled);
 
             let x_d = p0.x + (p1.x - p0.x) * tau;
             let y_d = p0.y + (p1.y - p0.y) * tau;
-            
+
             let mut heading_d = p0_heading + seg_data.delta_h * tau;
             heading_d = normalize_angle(heading_d);
-            
+
             let v0 = profile[i].velocity;
             let v1 = profile[i + 1].velocity;
-            let reversed = if profile[i].is_reversed {
-                -1.0
-            } else {
-                1.0
-            };
+            let reversed = if profile[i].is_reversed { -1.0 } else { 1.0 };
             let v_d = (v0 + (v1 - v0) * tau) * reversed;
-            
+
             let pose = self.odometry.pose();
             let dx = x_d - pose.x;
             let dy = y_d - pose.y;
@@ -196,41 +191,51 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let e_y = -dx * pose.heading.sin() + dy * pose.heading.cos();
             let e_theta = normalize_angle(heading_d - pose.heading);
 
+            #[inline]
+            fn sinc(x: f64) -> f64 {
+                if x.abs() < 1e-4 {
+                    // use second term of taylor series of sin(x)/x as a decent approximation
+                    1.0 - x * x / 6.0
+                } else {
+                    x.sin() / x
+                }
+            }
             let k = 2.0 * zeta * (w_d * w_d + b * v_d * v_d).sqrt();
             let v = v_d * e_theta.cos() + k * e_x;
-            let w = if e_theta.abs() < 1e-9 {
-                w_d + k * e_theta
-            } else {
-                w_d + k * e_theta + (b * v_d * e_theta.sin() * e_y) / e_theta
-            };
-            
+            let w = w_d + k * e_theta + b * v_d * sinc(e_theta) * e_y;
+
             let wheel_vel_l = v + w * self.config.track_width / 2.0;
             let wheel_vel_r = v - w * self.config.track_width / 2.0;
-            let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0) * (self.config.wheel_diameter * PI);
-            let vl = (wheel_vel_l / max_linear_vel * self.config.max_volts).clamp(-self.config.max_volts, self.config.max_volts);
-            let vr = (wheel_vel_r / max_linear_vel * self.config.max_volts).clamp(-self.config.max_volts, self.config.max_volts);
+            let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0)
+                * (self.config.wheel_diameter * PI);
+            let vl = (wheel_vel_l / max_linear_vel * self.config.max_volts)
+                .clamp(-self.config.max_volts, self.config.max_volts);
+            let vr = (wheel_vel_r / max_linear_vel * self.config.max_volts)
+                .clamp(-self.config.max_volts, self.config.max_volts);
             if vl.abs().max(vr.abs()) >= 3.0 && self.check_stall() {
                 println!("ramsete: stall detected");
                 break;
             }
-            for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
-            for m in self.right_motors.iter_mut() { let _ = m.set_voltage(vr); }
+            for m in self.left_motors.iter_mut() {
+                let _ = m.set_voltage(vl);
+            }
+            for m in self.right_motors.iter_mut() {
+                let _ = m.set_voltage(vr);
+            }
         }
-        for m in self.left_motors.iter_mut().chain(self.right_motors.iter_mut()) {
+        for m in self
+            .left_motors
+            .iter_mut()
+            .chain(self.right_motors.iter_mut())
+        {
             let _ = m.brake(BrakeMode::Hold);
         }
     }
 
-    pub async fn drive_to_point(
-        &mut self,
-        target_x: f64,
-        target_y: f64,
-        settings: PoseSettings,
-    ) {
+    pub async fn drive_to_point(&mut self, target_x: f64, target_y: f64, settings: PoseSettings) {
         self.update_odometry();
         let pose_before_turn = self.odometry.pose();
-        let angle_to_target =
-            (target_y - pose_before_turn.y).atan2(target_x - pose_before_turn.x);
+        let angle_to_target = (target_y - pose_before_turn.y).atan2(target_x - pose_before_turn.x);
 
         let target_orientation = if settings.is_reversed {
             normalize_angle(angle_to_target + PI)
@@ -254,8 +259,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         };
 
         if drive_dist.abs() > 0.01 {
-            self.drive_straight(drive_dist, settings.max_voltage)
-                .await;
+            self.drive_straight(drive_dist, settings.max_voltage).await;
         }
     }
 
@@ -291,12 +295,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let dh = normalize_angle(h - initial_heading);
             self.triggers.check_angle(dh.to_degrees());
             let e = normalize_angle(a - h);
-            
+
             if self.check_stall() {
                 println!("turn_to_angle: stall detected");
                 break;
             }
-            
+
             let e2 = e.to_degrees().abs();
             if e2 <= self.config.small_turn_exit_error {
                 tb = None;
@@ -304,10 +308,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     ts = Some(Instant::now());
                 }
                 if let Some(t) = ts
-                    && t.elapsed() >= self.config.small_turn_settle_time {
-                        println!("turn_to_angle: done (small error)");
-                        break;
-                    }
+                    && t.elapsed() >= self.config.small_turn_settle_time
+                {
+                    println!("turn_to_angle: done (small error)");
+                    break;
+                }
             } else {
                 ts = None;
                 if e2 <= self.config.big_turn_exit_error {
@@ -315,20 +320,31 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                         tb = Some(Instant::now());
                     }
                     if let Some(t) = tb
-                        && t.elapsed() >= self.config.big_turn_settle_time {
-                            println!("turn_to_angle: done (big error)");
-                            break;
-                        }
+                        && t.elapsed() >= self.config.big_turn_settle_time
+                    {
+                        println!("turn_to_angle: done (big error)");
+                        break;
+                    }
                 } else {
                     tb = None;
                 }
             }
             let u = pid.next(e, dt).clamp(-v, v);
-            for m in self.left_motors.iter_mut() { let _ = m.set_voltage(u); }
-            for m in self.right_motors.iter_mut() { let _ = m.set_voltage(-u); }
+            for m in self.left_motors.iter_mut() {
+                let _ = m.set_voltage(u);
+            }
+            for m in self.right_motors.iter_mut() {
+                let _ = m.set_voltage(-u);
+            }
         }
 
-        for m in self.left_motors.iter_mut().chain(self.right_motors.iter_mut()) { let _ = m.brake(BrakeMode::Hold); }
+        for m in self
+            .left_motors
+            .iter_mut()
+            .chain(self.right_motors.iter_mut())
+        {
+            let _ = m.brake(BrakeMode::Hold);
+        }
     }
 
     pub async fn calibrate_tracking_wheels(&mut self) {
@@ -358,7 +374,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
             let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
-            
+
             let parallel_delta = parallel_pos.as_revolutions();
             let perpendicular_delta = perpendicular_pos.as_revolutions();
 
@@ -411,8 +427,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let current = self.odometry.pose();
             let dx = current.x - initial_pose.x;
             let dy = current.y - initial_pose.y;
-            let traveled = (dx.hypot(dy))
-                * (dx * initial_heading.cos() + dy * initial_heading.sin()).signum();
+            let traveled =
+                (dx.hypot(dy)) * (dx * initial_heading.cos() + dy * initial_heading.sin()).signum();
             self.triggers.check_distance(traveled.abs());
 
             let err = target_dist - traveled;
@@ -422,10 +438,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     small_error_timer = Some(Instant::now());
                 }
                 if let Some(t) = small_error_timer
-                    && t.elapsed() >= self.config.small_drive_settle_time {
-                        println!("drive_straight: done (small error)");
-                        break;
-                    }
+                    && t.elapsed() >= self.config.small_drive_settle_time
+                {
+                    println!("drive_straight: done (small error)");
+                    break;
+                }
             } else {
                 small_error_timer = None;
                 if err.abs() <= self.config.big_drive_exit_error {
@@ -433,10 +450,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                         big_error_timer = Some(Instant::now());
                     }
                     if let Some(t) = big_error_timer
-                        && t.elapsed() >= self.config.big_drive_settle_time {
-                            println!("drive_straight: done (big error)");
-                            break;
-                        }
+                        && t.elapsed() >= self.config.big_drive_settle_time
+                    {
+                        println!("drive_straight: done (big error)");
+                        break;
+                    }
                 } else {
                     big_error_timer = None;
                 }
@@ -444,16 +462,25 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             let u = drive_pid.next(err, dt);
             let heading_error = normalize_angle(initial_heading - current.heading);
-            let tc = heading_pid.next(heading_error, dt)
+            let tc = heading_pid
+                .next(heading_error, dt)
                 .clamp(-self.config.max_volts, self.config.max_volts);
 
             let vl = (u + tc).clamp(-max_voltage, max_voltage);
             let vr = (u - tc).clamp(-max_voltage, max_voltage);
-            for m in self.left_motors.iter_mut() { let _ = m.set_voltage(vl); }
-            for m in self.right_motors.iter_mut() { let _ = m.set_voltage(vr); }
+            for m in self.left_motors.iter_mut() {
+                let _ = m.set_voltage(vl);
+            }
+            for m in self.right_motors.iter_mut() {
+                let _ = m.set_voltage(vr);
+            }
         }
 
-        for m in self.left_motors.iter_mut().chain(self.right_motors.iter_mut()) {
+        for m in self
+            .left_motors
+            .iter_mut()
+            .chain(self.right_motors.iter_mut())
+        {
             let _ = m.brake(BrakeMode::Hold);
         }
     }
