@@ -76,16 +76,17 @@ async fn main(peripherals: Peripherals) {
             ui.set_selected_route(sel as i32);
         }
     }
+    ui.show().expect("failed to show application");
+
+    let mut dp = dynamic_peripherals;
     let ui_weak = ui.as_weak();
-    slint::invoke_from_event_loop(move || {
-        let ui_weak = ui_weak.clone();
-        vexide::task::spawn(async move {
-            let robot = Robot::new(&mut dynamic_peripherals, ui_weak).await;
-            vexide::task::spawn(robot.compete()).detach();
-        })
-        .detach();
+    vexide::task::spawn(async move {
+        // give the event loop a moment to start painting
+        sleep(Duration::from_millis(1)).await;
+        let robot = Robot::new(&mut dp, ui_weak).await;
+        vexide::task::spawn(robot.compete()).detach();
     })
-    .expect("failed to schedule robot initialization");
+    .detach();
 
     ui.run().expect("failed to run application");
 
