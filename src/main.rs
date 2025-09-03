@@ -248,9 +248,10 @@ impl Compete for Robot {
 
     async fn driver(&mut self) {
         loop {
-            self.chassis.cheesy_control();
-            self.chassis.handle_intake_outtake_controls();
-            self.chassis.toggle_scraper();
+            let c_state = self.chassis.controller.state().unwrap_or_default();
+            self.chassis.cheesy_control(&c_state);
+            self.chassis.handle_intake_outtake_controls(&c_state);
+            self.chassis.toggle_scraper(&c_state);
             // let c_state = self.chassis.controller.state().unwrap_or_default();
             // if c_state.button_a.is_pressed() {
             //     self.chassis.calibrate_tracking_wheels().await;

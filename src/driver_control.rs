@@ -32,9 +32,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             self.quick_stop_accumulator = 0.0;
         }
     }
-    pub fn cheesy_control(&mut self) {
+    pub fn cheesy_control(&mut self, c_state: &vexide::devices::controller::ControllerState) {
         self.update_odometry();
-        let c_state = self.controller.state().unwrap_or_default();
         let throttle = c_state.left_stick.y();
         let turn = c_state.right_stick.x();
         // taken from BLRS repo
@@ -86,14 +85,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let _ = m.set_voltage(vr);
         }
     }
-    pub fn toggle_scraper(&mut self) {
-        let c_state = self.controller.state().unwrap_or_default();
+    pub fn toggle_scraper(&mut self, c_state: &vexide::devices::controller::ControllerState) {
         if c_state.button_a.is_now_pressed() {
             let _ = self.scraper.toggle();
         }
     }
-    pub fn handle_intake_outtake_controls(&mut self) {
-        let c_state = self.controller.state().unwrap_or_default();
+    pub fn handle_intake_outtake_controls(&mut self, c_state: &vexide::devices::controller::ControllerState) {
         let l1_now = c_state.button_l1.is_now_pressed();
         let l2_now = c_state.button_l2.is_now_pressed();
         let l2_held = c_state.button_l2.is_pressed();
@@ -219,7 +216,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 let applied = if i == 2 { -dir } else { dir };
                 let _ = m.set_voltage(12.0 * applied);
             }
-            if dir > 0.0 {
+            if dir > 0.0 && self.hood.is_low().unwrap_or(false) {
                 let _ = self.hood.set_high();
             }
             return true;
@@ -232,7 +229,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         for m in self.intake_motors.iter_mut() {
             let _ = m.set_voltage(12.0 * dir);
         }
-        if dir > 0.0 {
+        if dir > 0.0 && self.hood.is_low().unwrap_or(false) {
             let _ = self.hood.set_high();
         }
         true
@@ -275,7 +272,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             }
         }
-        let _ = self.hood.set_low();
+        if self.hood.is_high().unwrap_or(false) {
+            let _ = self.hood.set_low();
+        }
         true
     }
 
