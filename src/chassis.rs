@@ -60,6 +60,15 @@ pub struct ChassisConfig {
     pub tw_config: TrackingWheelConfig,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum IntakeMode {
+    Idle,
+    Intake,
+    Outtake,
+    OuttakeMiddle,
+    Reverse,
+}
+
 pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
     pub right_motors: [Motor; R],
@@ -77,14 +86,9 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub quick_stop_accumulator: f64,
     pub neg_inertia_accumulator: f64,
     pub triggers: TriggerManager,
-    pub intake_state: i8,
-    pub prev_l1: bool,
-    pub outtake_state: i8,
-    pub prev_r1: bool,
+    pub intake_mode: IntakeMode,
     pub outtake_jam_reverse_until: Option<Instant>,
     pub outtake_initial_reverse_until: Option<Instant>,
-    pub outtake_middle_state: i8,
-    pub prev_r2: bool,
     pub outtake_middle_jam_reverse_until: Option<Instant>,
     pub outtake_middle_initial_reverse_until: Option<Instant>,
     pub scraper: AdiDigitalOut,
@@ -210,14 +214,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             quick_stop_accumulator: 0.0,
             neg_inertia_accumulator: 0.0,
             triggers: TriggerManager::new(args.triggers),
-            intake_state: 0,
-            prev_l1: false,
-            outtake_state: 0,
-            prev_r1: false,
+            intake_mode: IntakeMode::Idle,
             outtake_jam_reverse_until: None,
             outtake_initial_reverse_until: None,
-            outtake_middle_state: 0,
-            prev_r2: false,
             outtake_middle_jam_reverse_until: None,
             outtake_middle_initial_reverse_until: None,
             scraper: args.scraper,

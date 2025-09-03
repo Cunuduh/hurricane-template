@@ -39,7 +39,6 @@ async fn main(peripherals: Peripherals) {
     let mut dynamic_peripherals = DynamicPeripherals::new(peripherals);
     vexide_slint::initialize_slint_platform(dynamic_peripherals.take_display().expect("display"));
     let ui = VexSelector::new().expect("failed to create application");
-    let robot = Robot::new(&mut dynamic_peripherals, ui.as_weak()).await;
     ui.on_route_selected(|idx| {
         let i = idx as usize;
         UI_SELECTED_ROUTE.store(i, Ordering::Relaxed);
@@ -77,7 +76,17 @@ async fn main(peripherals: Peripherals) {
             ui.set_selected_route(sel as i32);
         }
     }
-    vexide::task::spawn(robot.compete()).detach();
+    let ui_weak = ui.as_weak();
+    slint::invoke_from_event_loop(move || {
+        let ui_weak = ui_weak.clone();
+        vexide::task::spawn(async move {
+            let robot = Robot::new(&mut dynamic_peripherals, ui_weak).await;
+            vexide::task::spawn(robot.compete()).detach();
+        })
+        .detach();
+    })
+    .expect("failed to schedule robot initialization");
+
     ui.run().expect("failed to run application");
 
     vexide::program::exit();

@@ -1,6 +1,6 @@
 use core::{f64::consts::PI, time::Duration};
 
-use super::chassis::Chassis;
+use super::chassis::{Chassis, IntakeMode};
 extern crate alloc;
 use vexide::{prelude::*, time::Instant};
 
@@ -94,78 +94,65 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
     pub fn handle_intake_outtake_controls(&mut self) {
         let c_state = self.controller.state().unwrap_or_default();
-        let l1 = c_state.button_l1.is_pressed();
-        let l2 = c_state.button_l2.is_pressed();
-        let r1 = c_state.button_r1.is_pressed();
-        let r2 = c_state.button_r2.is_pressed();
+        let l1_now = c_state.button_l1.is_now_pressed();
+        let l2_now = c_state.button_l2.is_now_pressed();
+        let l2_held = c_state.button_l2.is_pressed();
+        let r1_now = c_state.button_r1.is_now_pressed();
+        let r2_now = c_state.button_r2.is_now_pressed();
 
-        let l1_edge = l1 && !self.prev_l1;
-        let r1_edge = r1 && !self.prev_r1;
-        let r2_edge = r2 && !self.prev_r2;
-
-        let any_running = self.intake_state != 0
-            || self.outtake_state != 0
-            || self.outtake_middle_state != 0
-            || self.outtake_initial_reverse_until.is_some()
+        let any_timers = self.outtake_initial_reverse_until.is_some()
             || self.outtake_jam_reverse_until.is_some()
             || self.outtake_middle_initial_reverse_until.is_some()
             || self.outtake_middle_jam_reverse_until.is_some();
+        let any_running = self.intake_mode != IntakeMode::Idle || any_timers;
 
-        if (l1_edge || r1_edge || r2_edge) && any_running {
-            self.intake_state = 0;
-            self.outtake_state = 0;
-            self.outtake_middle_state = 0;
+        if (l1_now || r1_now || r2_now) && any_running {
+            self.intake_mode = IntakeMode::Idle;
             self.outtake_initial_reverse_until = None;
             self.outtake_jam_reverse_until = None;
             self.outtake_middle_initial_reverse_until = None;
             self.outtake_middle_jam_reverse_until = None;
+            self.indexer_run_until = None;
             for m in self.intake_motors.iter_mut() {
                 let _ = m.set_voltage(0.0);
             }
-            self.prev_l1 = l1;
-            self.prev_r1 = r1;
-            self.prev_r2 = r2;
             return;
         }
 
-        if !(self.intake_state != 0
-            || self.outtake_state != 0
-            || self.outtake_middle_state != 0
-            || self.outtake_initial_reverse_until.is_some()
-            || self.outtake_jam_reverse_until.is_some()
-            || self.outtake_middle_initial_reverse_until.is_some()
-            || self.outtake_middle_jam_reverse_until.is_some())
-        {
-            if l1_edge {
-                self.intake_state = if self.intake_state == 1 { 0 } else { 1 };
-            } else if r1_edge {
-                if self.outtake_state == 1 {
-                    self.outtake_state = 0;
-                    self.outtake_jam_reverse_until = None;
-                    self.outtake_initial_reverse_until = None;
-                } else {
-                    self.outtake_state = 1;
+        if !any_running {
+            if l1_now {
+                self.intake_mode = match self.intake_mode {
+                    IntakeMode::Intake => IntakeMode::Idle,
+                    _ => IntakeMode::Intake,
+                };
+            } else if r1_now {
+                self.intake_mode = match self.intake_mode {
+                    IntakeMode::Outtake => IntakeMode::Idle,
+                    _ => IntakeMode::Outtake,
+                };
+                if self.intake_mode == IntakeMode::Outtake {
                     self.outtake_initial_reverse_until =
                         Some(Instant::now() + Duration::from_millis(175));
                 }
-            } else if r2_edge {
-                if self.outtake_middle_state == 1 {
-                    self.outtake_middle_state = 0;
-                    self.outtake_middle_jam_reverse_until = None;
-                    self.outtake_middle_initial_reverse_until = None;
-                } else {
-                    self.outtake_middle_state = 1;
+            } else if r2_now {
+                self.intake_mode = match self.intake_mode {
+                    IntakeMode::OuttakeMiddle => IntakeMode::Idle,
+                    _ => IntakeMode::OuttakeMiddle,
+                };
+                if self.intake_mode == IntakeMode::OuttakeMiddle {
                     self.outtake_middle_initial_reverse_until =
                         Some(Instant::now() + Duration::from_millis(175));
                 }
+            } else if l2_now {
+                // L2 acts as a toggle ONLY when not running on top of other commands
+                self.intake_mode = match self.intake_mode {
+                    IntakeMode::Reverse => IntakeMode::Idle,
+                    _ => IntakeMode::Reverse,
+                };
             }
         }
 
-        self.prev_l1 = l1;
-        self.prev_r1 = r1;
-        self.prev_r2 = r2;
-
-        if l2 {
+        if l2_held {
             for m in self.intake_motors.iter_mut() {
                 let _ = m.set_voltage(-12.0);
             }
@@ -174,13 +161,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         let stalled = self.intake_stalled();
         Self::poll_stall_and_reverse_for(
-            self.outtake_state,
+            matches!(self.intake_mode, IntakeMode::Outtake),
             stalled,
             &mut self.outtake_initial_reverse_until,
             &mut self.outtake_jam_reverse_until,
         );
         Self::poll_stall_and_reverse_for(
-            self.outtake_middle_state,
+            matches!(self.intake_mode, IntakeMode::OuttakeMiddle),
             stalled,
             &mut self.outtake_middle_initial_reverse_until,
             &mut self.outtake_middle_jam_reverse_until,
@@ -191,86 +178,109 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let reversing_outtake_middle = self.outtake_middle_initial_reverse_until.is_some()
             || self.outtake_middle_jam_reverse_until.is_some();
 
-        let outtake_middle_active = self.outtake_middle_state != 0 || reversing_outtake_middle;
-        if outtake_middle_active {
-            let dir = if l2 || reversing_outtake_middle {
-                -1.0
-            } else {
-                self.outtake_middle_state as f64
-            };
-            if dir != 0.0 {
-                for (i, m) in self.intake_motors.iter_mut().enumerate() {
-                    let applied = if i == 2 { -dir } else { dir };
-                    let _ = m.set_voltage(12.0 * applied);
-                }
-                if dir > 0.0 {
-                    let _ = self.hood.set_high();
-                }
-                return;
-            }
+        let outtake_middle_active = matches!(self.intake_mode, IntakeMode::OuttakeMiddle)
+            || reversing_outtake_middle;
+        if outtake_middle_active && self.apply_outtake_middle(reversing_outtake_middle) {
+            return;
         }
 
-        let outtake_active = self.outtake_state != 0 || reversing_outtake;
-        if outtake_active {
-            let dir = if l2 || reversing_outtake {
-                -1.0
-            } else {
-                self.outtake_state as f64
-            };
-            if dir != 0.0 {
-                for m in self.intake_motors.iter_mut() {
-                    let _ = m.set_voltage(12.0 * dir);
-                }
-                if dir > 0.0 {
-                    let _ = self.hood.set_high();
-                }
-                return;
-            }
+        let outtake_active = matches!(self.intake_mode, IntakeMode::Outtake) || reversing_outtake;
+        if outtake_active && self.apply_outtake(reversing_outtake) {
+            return;
         }
 
-        let dir = if l2 { -1.0 } else { self.intake_state as f64 };
-        if dir != 0.0 {
-            if dir < 0.0 {
-                for m in self.intake_motors.iter_mut() {
-                    let _ = m.set_voltage(12.0 * dir);
-                }
-                return;
-            }
-            let prox = self.optical_sensor.proximity().unwrap_or_default();
-            let now = Instant::now();
-            if prox >= 0.8 {
-                let target = now + Duration::from_millis(250);
-                self.indexer_run_until = Some(match self.indexer_run_until {
-                    Some(until) if until > target => until,
-                    _ => target,
-                });
-            }
-            let run_upper = match self.indexer_run_until {
-                Some(until) if now < until => true,
-                _ => {
-                    self.indexer_run_until = None;
-                    false
-                }
-            };
-            if run_upper {
-                for m in self.intake_motors.iter_mut() {
-                    let _ = m.set_voltage(12.0);
-                }
-            } else {
-                for (i, m) in self.intake_motors.iter_mut().enumerate() {
-                    if i == 0 {
-                        let _ = m.set_voltage(12.0);
-                    } else {
-                        let _ = m.set_voltage(0.0);
-                    }
-                }
-            }
-            let _ = self.hood.set_low();
+        if matches!(self.intake_mode, IntakeMode::Reverse) && self.apply_reverse() {
+            return;
+        }
+
+        if matches!(self.intake_mode, IntakeMode::Intake) && self.apply_intake() {
+            return;
+        }
+
+        self.stop_all();
+    }
+
+    fn stop_all(&mut self) {
+        for m in self.intake_motors.iter_mut() {
+            let _ = m.set_voltage(0.0);
         }
     }
 
+    fn apply_outtake_middle(&mut self, reversing_outtake_middle: bool) -> bool {
+        let dir = if reversing_outtake_middle {
+            -1.0
+        } else if matches!(self.intake_mode, IntakeMode::OuttakeMiddle) {
+            1.0
+        } else {
+            0.0
+        };
+        if dir != 0.0 {
+            for (i, m) in self.intake_motors.iter_mut().enumerate() {
+                let applied = if i == 2 { -dir } else { dir };
+                let _ = m.set_voltage(12.0 * applied);
+            }
+            if dir > 0.0 {
+                let _ = self.hood.set_high();
+            }
+            return true;
+        }
+        false
+    }
+
+    fn apply_outtake(&mut self, reversing_outtake: bool) -> bool {
+        let dir = if reversing_outtake { -1.0 } else { 1.0 };
+        for m in self.intake_motors.iter_mut() {
+            let _ = m.set_voltage(12.0 * dir);
+        }
+        if dir > 0.0 {
+            let _ = self.hood.set_high();
+        }
+        true
+    }
+
+    fn apply_reverse(&mut self) -> bool {
+        for m in self.intake_motors.iter_mut() {
+            let _ = m.set_voltage(-12.0);
+        }
+        true
+    }
+
+    fn apply_intake(&mut self) -> bool {
+        let prox = self.optical_sensor.proximity().unwrap_or_default();
+        let now = Instant::now();
+        if prox >= 0.5 {
+            let target = now + Duration::from_millis(250);
+            self.indexer_run_until = Some(match self.indexer_run_until {
+                Some(until) if until > target => until,
+                _ => target,
+            });
+        }
+        let run_upper = match self.indexer_run_until {
+            Some(until) if now < until => true,
+            _ => {
+                self.indexer_run_until = None;
+                false
+            }
+        };
+        if run_upper {
+            for m in self.intake_motors.iter_mut() {
+                let _ = m.set_voltage(12.0);
+            }
+        } else {
+            for (i, m) in self.intake_motors.iter_mut().enumerate() {
+                if i == 0 {
+                    let _ = m.set_voltage(12.0);
+                } else {
+                    let _ = m.set_voltage(0.0);
+                }
+            }
+        }
+        let _ = self.hood.set_low();
+        true
+    }
+
     fn poll_stall_and_reverse_for(
-        state: i8,
+        is_active: bool,
         stalled: bool,
         initial_reverse_until: &mut Option<Instant>,
         jam_reverse_until: &mut Option<Instant>,
@@ -292,7 +302,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             return;
         }
 
-        if state == 1 && stalled {
+        if is_active && stalled {
             *jam_reverse_until = Some(now + Duration::from_millis(150));
         }
     }
