@@ -247,7 +247,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     fn apply_intake(&mut self) -> bool {
         let prox = self.optical_sensor.proximity().unwrap_or_default();
         let now = Instant::now();
-        if prox >= 0.5 && self.intake_ball_count <= 5 {
+        if prox >= 0.5 {
             self.intake_ball_count += 1;
             let target = now + Duration::from_millis(250);
             self.indexer_run_until = Some(match self.indexer_run_until {
