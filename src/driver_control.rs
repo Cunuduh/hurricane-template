@@ -103,7 +103,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             || self.outtake_middle_jam_reverse_until.is_some();
         let any_running = self.intake_mode != IntakeMode::Idle || any_timers;
 
-        if (l1_now || r1_now || r2_now) && any_running {
+        if (l1_now || r1_now || r2_now || l2_now) && any_running {
             self.intake_mode = IntakeMode::Idle;
             self.outtake_initial_reverse_until = None;
             self.outtake_jam_reverse_until = None;
@@ -212,11 +212,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             0.0
         };
         if dir != 0.0 {
+            self.intake_ball_count = 0;
             for (i, m) in self.intake_motors.iter_mut().enumerate() {
                 let applied = if i == 2 { -dir } else { dir };
                 let _ = m.set_voltage(12.0 * applied);
             }
-            if dir > 0.0 && self.hood.is_low().unwrap_or(false) {
+            if dir > 0.0 {
                 let _ = self.hood.set_high();
             }
             return true;
@@ -225,11 +226,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     fn apply_outtake(&mut self, reversing_outtake: bool) -> bool {
+        self.intake_ball_count = 0;
         let dir = if reversing_outtake { -1.0 } else { 1.0 };
         for m in self.intake_motors.iter_mut() {
             let _ = m.set_voltage(12.0 * dir);
         }
-        if dir > 0.0 && self.hood.is_low().unwrap_or(false) {
+        if dir > 0.0 {
             let _ = self.hood.set_high();
         }
         true
@@ -245,7 +247,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     fn apply_intake(&mut self) -> bool {
         let prox = self.optical_sensor.proximity().unwrap_or_default();
         let now = Instant::now();
-        if prox >= 0.5 {
+        if prox >= 0.5 && self.intake_ball_count <= 5 {
+            self.intake_ball_count += 1;
             let target = now + Duration::from_millis(250);
             self.indexer_run_until = Some(match self.indexer_run_until {
                 Some(until) if until > target => until,
@@ -272,9 +275,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             }
         }
-        if self.hood.is_high().unwrap_or(false) {
-            let _ = self.hood.set_low();
-        }
+        let _ = self.hood.set_low();
         true
     }
 
