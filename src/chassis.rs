@@ -68,7 +68,41 @@ pub enum IntakeMode {
     OuttakeMiddle,
     Reverse,
 }
-
+pub struct BlockCounter {
+    pub block_count: usize,
+    detect_threshold: f64,
+    release_threshold: f64,
+    block_detected: bool,
+    last_count_time: Instant,
+    min_time_between_blocks: Duration,
+}
+impl BlockCounter {
+    pub fn new() -> Self {
+        Self {
+            block_count: 0,
+            detect_threshold: 0.5,
+            release_threshold: 0.1,
+            block_detected: false,
+            last_count_time: Instant::now(),
+            min_time_between_blocks: Duration::from_millis(40),
+        }
+    }
+    pub fn update(&mut self, proximity: f64) -> bool {
+        let mut new_block = false;
+        if !self.block_detected && proximity > self.detect_threshold {
+            // only count if enough time has passed since last block
+            if Instant::now().duration_since(self.last_count_time) > self.min_time_between_blocks {
+                self.block_count += 1;
+                self.last_count_time = Instant::now();
+                new_block = true;
+            }
+            self.block_detected = true;
+        } else if self.block_detected && proximity < self.release_threshold {
+            self.block_detected = false;
+        }
+        new_block
+    }
+}
 pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
     pub right_motors: [Motor; R],
@@ -86,8 +120,8 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub quick_stop_accumulator: f64,
     pub neg_inertia_accumulator: f64,
     pub triggers: TriggerManager,
-    pub intake_ball_count: usize,
     pub intake_mode: IntakeMode,
+    pub block_counter: BlockCounter,
     pub outtake_jam_reverse_until: Option<Instant>,
     pub outtake_initial_reverse_until: Option<Instant>,
     pub outtake_middle_jam_reverse_until: Option<Instant>,
@@ -198,6 +232,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let _ = args.hood.set_low();
         let _ = args.colour_sort.set_low();
         let _ = args.optical_sensor.set_led_brightness(1.0);
+        let _ = args
+            .optical_sensor
+            .set_integration_time(Duration::from_millis(40));
         Self {
             left_motors: args.left_motors,
             right_motors: args.right_motors,
@@ -215,8 +252,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             quick_stop_accumulator: 0.0,
             neg_inertia_accumulator: 0.0,
             triggers: TriggerManager::new(args.triggers),
-            intake_ball_count: 0,
             intake_mode: IntakeMode::Idle,
+            block_counter: BlockCounter::new(),
             outtake_jam_reverse_until: None,
             outtake_initial_reverse_until: None,
             outtake_middle_jam_reverse_until: None,

@@ -212,7 +212,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             0.0
         };
         if dir != 0.0 {
-            self.intake_ball_count = 0;
+            self.block_counter.block_count = 0;
             for (i, m) in self.intake_motors.iter_mut().enumerate() {
                 let applied = if i == 2 { -dir } else { dir };
                 let _ = m.set_voltage(12.0 * applied);
@@ -226,8 +226,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     fn apply_outtake(&mut self, reversing_outtake: bool) -> bool {
-        self.intake_ball_count = 0;
         let dir = if reversing_outtake { -1.0 } else { 1.0 };
+        self.block_counter.block_count = 0;
         for m in self.intake_motors.iter_mut() {
             let _ = m.set_voltage(12.0 * dir);
         }
@@ -247,8 +247,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     fn apply_intake(&mut self) -> bool {
         let prox = self.optical_sensor.proximity().unwrap_or_default();
         let now = Instant::now();
-        if prox >= 0.5 {
-            self.intake_ball_count += 1;
+        if self.block_counter.update(prox) && self.block_counter.block_count <= 5 {
             let target = now + Duration::from_millis(250);
             self.indexer_run_until = Some(match self.indexer_run_until {
                 Some(until) if until > target => until,
