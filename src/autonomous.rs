@@ -94,7 +94,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
             last_time = now;
             let elapsed = now.duration_since(start_time).as_secs_f64();
-            self.update_odometry();
+            self.update_state();
             if now.duration_since(start_time) >= safety_timeout {
                 println!("ramsete: timeout");
                 break;
@@ -233,7 +233,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     pub async fn drive_to_point(&mut self, target_x: f64, target_y: f64, settings: PoseSettings) {
-        self.update_odometry();
+        self.update_state();
         let pose_before_turn = self.odometry.pose();
         let angle_to_target = (target_y - pose_before_turn.y).atan2(target_x - pose_before_turn.x);
 
@@ -246,7 +246,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.turn_to_angle(target_orientation.to_degrees(), settings.max_voltage)
             .await;
 
-        self.update_odometry();
+        self.update_state();
         let pose_after_turn = self.odometry.pose();
         let dx = target_x - pose_after_turn.x;
         let dy = target_y - pose_after_turn.y;
@@ -264,7 +264,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     pub async fn turn_to_point(&mut self, x: f64, y: f64, v: f64) {
-        self.update_odometry();
+        self.update_state();
         let p = self.odometry.pose();
         let a = (y - p.y).atan2(x - p.x);
         self.turn_to_angle(a.to_degrees(), v).await;
@@ -290,7 +290,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
             t0 = t;
 
-            self.update_odometry();
+            self.update_state();
             let h = self.odometry.pose().heading;
             let dh = normalize_angle(h - initial_heading);
             self.triggers.check_angle(dh.to_degrees());
@@ -418,7 +418,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
             last_time = now;
 
-            self.update_odometry();
+            self.update_state();
             if self.check_stall() {
                 println!("drive_straight: stall detected");
                 break;

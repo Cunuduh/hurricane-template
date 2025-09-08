@@ -3,6 +3,7 @@ extern crate alloc;
 use slint::SharedString;
 use vexide::{
     devices::{
+        battery,
         controller::Controller,
         smart::imu::{InertialError, InertialSensor},
     },
@@ -131,6 +132,8 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub colour_sort: AdiDigitalOut,
     pub optical_sensor: OpticalSensor,
     pub indexer_run_until: Option<Instant>,
+    pub ui: slint::Weak<VexSelector>,
+    pub last_diagnostics_update: Instant,
 }
 pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
@@ -263,15 +266,18 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             colour_sort: args.colour_sort,
             optical_sensor: args.optical_sensor,
             indexer_run_until: None,
+            ui,
+            last_diagnostics_update: Instant::now(),
         }
     }
 
-    pub fn update_odometry(&mut self) {
+    pub fn update_state(&mut self) {
         let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
         let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
         let imu_heading_rad = self.imu.rotation().unwrap_or_default().to_radians();
         self.odometry
             .update(parallel_pos, perpendicular_pos, imu_heading_rad);
+        self.update_diagnostics();
     }
 
     pub fn check_stall(&mut self) -> bool {
@@ -311,5 +317,46 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             self.stall_timer = None;
         }
         false
+    }
+
+    fn update_diagnostics(&mut self) {
+        let now = Instant::now();
+        if now.duration_since(self.last_diagnostics_update) < Duration::from_millis(100) {
+            return;
+        }
+        self.last_diagnostics_update = now;
+
+        if let Some(handle) = self.ui.upgrade() {
+            let p = self.odometry.pose();
+            handle.set_pose_x(p.x as f32);
+            handle.set_pose_y(p.y as f32);
+            let heading_deg = self.imu.heading().unwrap_or_default() as f32;
+            handle.set_heading(heading_deg);
+
+            let lm1 = self.left_motors[0].temperature().unwrap_or_default() as f32;
+            let lm2 = self.left_motors[1].temperature().unwrap_or_default() as f32;
+            let lm3 = self.left_motors[2].temperature().unwrap_or_default() as f32;
+            let rm1 = self.right_motors[0].temperature().unwrap_or_default() as f32;
+            let rm2 = self.right_motors[1].temperature().unwrap_or_default() as f32;
+            let rm3 = self.right_motors[2].temperature().unwrap_or_default() as f32;
+            let im1 = self.intake_motors[0].temperature().unwrap_or_default() as f32;
+            let im2 = self.intake_motors[1].temperature().unwrap_or_default() as f32;
+            let im3 = self.intake_motors[2].temperature().unwrap_or_default() as f32;
+
+            handle.set_left_motor_temp_1(lm1);
+            handle.set_left_motor_temp_2(lm2);
+            handle.set_left_motor_temp_3(lm3);
+            handle.set_right_motor_temp_1(rm1);
+            handle.set_right_motor_temp_2(rm2);
+            handle.set_right_motor_temp_3(rm3);
+            handle.set_intake_motor_temp_1(im1);
+            handle.set_intake_motor_temp_2(im2);
+            handle.set_intake_motor_temp_3(im3);
+
+            let battery_voltage = battery::voltage() as f32;
+            let battery_percentage = (battery::capacity() * 100.0) as f32;
+            handle.set_battery_voltage(battery_voltage);
+            handle.set_battery_percentage(battery_percentage);
+        }
     }
 }

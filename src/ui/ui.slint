@@ -1,5 +1,5 @@
 import { Button, VerticalBox, HorizontalBox } from "std-widgets.slint";
-
+import "./JetBrainsMono-Regular.ttf";
 export component VexSelector inherits Window {
     width: 480px;
     height: 240px;
@@ -11,6 +11,25 @@ export component VexSelector inherits Window {
     in-out property <bool> show_progress: false;
     in-out property <float> progress_value: 0.0; // 0.0 to 100.0
     in-out property <string> progress_text: "Calibrating IMU...";
+    in-out property <bool> diagnostics_visible: true;
+
+    in-out property <float> pose_x: 0.0;
+    in-out property <float> pose_y: 0.0;
+    in-out property <float> heading: 0.0;
+    in-out property <float> battery_percentage: 85.0;
+    in-out property <float> battery_voltage: 12.8; // nominal voltage
+
+    // individual motor temperatures (avoid dynamic allocations)
+    in-out property <float> left_motor_temp_1: 30.0;
+    in-out property <float> left_motor_temp_2: 55.0;
+    in-out property <float> left_motor_temp_3: 65.0;
+    in-out property <float> right_motor_temp_1: 45.0;
+    in-out property <float> right_motor_temp_2: 50.0;
+    in-out property <float> right_motor_temp_3: 60.0;
+    in-out property <float> intake_motor_temp_1: 25.0;
+    in-out property <float> intake_motor_temp_2: 55.0;
+    in-out property <float> intake_motor_temp_3: 40.0;
+    
     callback route_selected(index: int);
     Rectangle {
         width: parent.width;
@@ -49,21 +68,22 @@ export component VexSelector inherits Window {
                             color: is_red_alliance ? #ef4444 : #3b82f6;
                             font-size: 12px;
                             font-weight: 600;
+                            font-family: "JetBrains Mono";
                         }
 
                         Rectangle {
                             width: 40px;
-                            height: 20px;
+                            height: 24px;
                             background: is_red_alliance ? #ef4444 : #3b82f6;
-                            border-radius: 10px;
+                            border-radius: 12px;
                             
                             Rectangle {
-                                width: 18px;
-                                height: 18px;
+                                width: 20px;
+                                height: 20px;
                                 background: #f8fafc;
-                                border-radius: 9px;
-                                x: is_red_alliance ? 20px : 2px;
-                                y: 1px;
+                                border-radius: 10px;
+                                x: is_red_alliance ? 18px : 2px;
+                                y: 2px;
                                 
                                 animate x {
                                     duration: 100ms;
@@ -74,6 +94,33 @@ export component VexSelector inherits Window {
                             TouchArea {
                                 clicked => {
                                     is_red_alliance = !is_red_alliance;
+                                }
+                            }
+                        }
+                        Rectangle {
+                            width: 24px;
+                            height: 24px;
+                            background: diagnostics_visible ? #475569 : #1e293b;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: diagnostics_visible ? #64748b : #334155;
+
+                            animate background {
+                                duration: 150ms;
+                            }
+
+                            Image {
+                                source: @image-url("activity.svg");
+                                colorize: #f8fafc;
+                                width: 16px;
+                                height: 16px;
+                                x: (parent.width - self.width) / 2;
+                                y: (parent.height - self.height) / 2;
+                            }
+
+                            TouchArea {
+                                clicked => {
+                                    diagnostics_visible = !diagnostics_visible;
                                 }
                             }
                         }
@@ -106,6 +153,7 @@ export component VexSelector inherits Window {
                                 color: selected_route == idx ? #f8fafc : #cbd5e1;
                                 font-size: 10px;
                                 font-weight: 500;
+                                font-family: "JetBrains Mono";
                             }
                         }
 
@@ -120,19 +168,243 @@ export component VexSelector inherits Window {
             }
         }
 
-        // right panel - field preview
+        // right panel - field preview or console
         Rectangle {
-            border-width: 1px;
-            border-color: #334155;
             VerticalBox {
+                spacing: 0px;
                 padding: 0px;
                 alignment: start;
 
                 Image {
-                    width: 240px;
-                    height: 240px;
-                    // source: @image-url("field_preview.png");
+                    width: diagnostics_visible ? 0px : 240px;
+                    height: diagnostics_visible ? 0px : 240px;
+                    source: @image-url("cabbit.png");
                     image-fit: contain;
+                }
+
+                Rectangle {
+                    visible: diagnostics_visible;
+                    width: diagnostics_visible ? 240px : 0px;
+                    height: diagnostics_visible ? 240px : 0px;
+                    
+                    VerticalBox {
+                        spacing: 0px;
+                        padding-bottom: 0px;
+                        alignment: start;
+                        
+                        Text {
+                            text: "DIAGNOSTICS";
+                            color: #f8fafc;
+                            font-size: 14px;
+                            font-weight: 700;
+                            font-family: "JetBrains Mono";
+                            horizontal-alignment: TextHorizontalAlignment.left;
+                        }
+                        
+                        VerticalBox {
+                            spacing: 0px;
+                            padding-bottom: 0px;
+                            alignment: start;
+                            
+                            Text {
+                                text: "POSE";
+                                color: #94a3b8;
+                                font-size: 11px;
+                                font-weight: 600;
+                                font-family: "JetBrains Mono";
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 0px;
+                                padding: 0px;
+                                Text {
+                                    text: "X: " + Math.round(pose_x * 100) / 100 + "\"";
+                                    color: #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                }
+                                Text {
+                                    text: "Y: " + Math.round(pose_y * 100) / 100 + "\"";
+                                    color: #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                }
+                                Text {
+                                    text: "θ: " + Math.round(heading * 10) / 10 + "°";
+                                    color: #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                }
+                            }
+                        }
+                        VerticalBox {
+                            spacing: 0px;
+                            padding-bottom: 0px;
+                            alignment: start;
+                            
+                            Text {
+                                text: "STATUS";
+                                color: #94a3b8;
+                                font-size: 11px;
+                                font-weight: 600;
+                                font-family: "JetBrains Mono";
+                            }
+                            
+                            Text {
+                                text: "VOLTAGE: " + Math.round(battery_voltage * 10) / 10 + "V";
+                                color: (battery_voltage < 12.6 || battery_voltage > 12.9) ? #ef4444 : #e2e8f0;
+                                font-size: 11px;
+                                font-family: "JetBrains Mono";
+                            }
+                            
+                            Text {
+                                text: "BATTERY: " + Math.round(battery_percentage * 10) / 10 + "%";
+                                color: battery_percentage < 20 ? #ef4444 : #e2e8f0;
+                                font-size: 11px;
+                                font-family: "JetBrains Mono";
+                            }
+                        }
+                        
+                        VerticalBox {
+                            spacing: 2px;
+                            padding-bottom: 0px;
+                            alignment: start;
+                            
+                            Text {
+                                text: "MOTOR TEMPS (°C)";
+                                color: #94a3b8;
+                                font-size: 11px;
+                                font-weight: 600;
+                                font-family: "JetBrains Mono";
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 0px;
+                                padding: 0px;
+                                Text {
+                                    text: "L:";
+                                    color: #94a3b8;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 12px;
+                                }
+                                Text {
+                                    text: left_motor_temp_1;
+                                    color: left_motor_temp_1 >= 65 ? #ef4444
+                                        : left_motor_temp_1 >= 60 ? #f59e42
+                                        : left_motor_temp_1 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                                Text {
+                                    text: left_motor_temp_2;
+                                    color: left_motor_temp_2 >= 65 ? #ef4444
+                                        : left_motor_temp_2 >= 60 ? #f59e42
+                                        : left_motor_temp_2 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                                Text {
+                                    text: left_motor_temp_3;
+                                    color: left_motor_temp_3 >= 65 ? #ef4444
+                                        : left_motor_temp_3 >= 60 ? #f59e42
+                                        : left_motor_temp_3 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                            }
+
+                            HorizontalBox {
+                                spacing: 0px;
+                                padding: 0px;
+                                Text {
+                                    text: "R:";
+                                    color: #94a3b8;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 12px;
+                                }
+                                Text {
+                                    text: right_motor_temp_1;
+                                    color: right_motor_temp_1 >= 65 ? #ef4444
+                                        : right_motor_temp_1 >= 60 ? #f59e42
+                                        : right_motor_temp_1 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                                Text {
+                                    text: right_motor_temp_2;
+                                    color: right_motor_temp_2 >= 65 ? #ef4444
+                                        : right_motor_temp_2 >= 60 ? #f59e42
+                                        : right_motor_temp_2 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                                Text {
+                                    text: right_motor_temp_3;
+                                    color: right_motor_temp_3 >= 65 ? #ef4444
+                                        : right_motor_temp_3 >= 60 ? #f59e42
+                                        : right_motor_temp_3 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                            }
+                            
+                            HorizontalBox {
+                                spacing: 0px;
+                                padding: 0px;
+                                Text {
+                                    text: "I:";
+                                    color: #94a3b8;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 12px;
+                                }
+                                Text {
+                                    text: intake_motor_temp_1;
+                                    color: intake_motor_temp_1 >= 65 ? #ef4444
+                                        : intake_motor_temp_1 >= 60 ? #f59e42
+                                        : intake_motor_temp_1 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                                Text {
+                                    text: intake_motor_temp_2;
+                                    color: intake_motor_temp_2 >= 65 ? #ef4444
+                                        : intake_motor_temp_2 >= 60 ? #f59e42
+                                        : intake_motor_temp_2 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                                Text {
+                                    text: intake_motor_temp_3;
+                                    color: intake_motor_temp_3 >= 65 ? #ef4444
+                                        : intake_motor_temp_3 >= 60 ? #f59e42
+                                        : intake_motor_temp_3 >= 55 ? #fde047
+                                        : #e2e8f0;
+                                    font-size: 11px;
+                                    font-family: "JetBrains Mono";
+                                    min-width: 24px;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -170,6 +442,7 @@ export component VexSelector inherits Window {
                     color: #f8fafc;
                     font-size: 11px;
                     horizontal-alignment: center;
+                    font-family: "JetBrains Mono";
                 }
                 
                 Rectangle {
@@ -186,7 +459,6 @@ export component VexSelector inherits Window {
                             height: parent.height;
                             background: #3b82f6;
                             border-radius: 3px;
-                        
                         }
                     }
                 }

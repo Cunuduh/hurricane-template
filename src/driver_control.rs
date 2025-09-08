@@ -33,7 +33,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
     }
     pub fn cheesy_control(&mut self, c_state: &vexide::devices::controller::ControllerState) {
-        self.update_odometry();
+        self.update_state();
         let throttle = c_state.left_stick.y();
         let turn = c_state.right_stick.x();
         // taken from BLRS repo
