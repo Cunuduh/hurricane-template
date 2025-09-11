@@ -252,10 +252,9 @@ impl Compete for Robot {
             self.chassis.cheesy_control(&c_state);
             self.chassis.handle_intake_outtake_controls(&c_state);
             self.chassis.toggle_scraper(&c_state);
-            // let c_state = self.chassis.controller.state().unwrap_or_default();
-            // if c_state.button_a.is_pressed() {
-            //     self.chassis.calibrate_tracking_wheels().await;
-            // }
+            if c_state.button_b.is_pressed() {
+                self.chassis.calibrate_tracking_wheels().await;
+            }
             sleep(self.chassis.config.dt).await;
         }
     }

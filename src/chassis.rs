@@ -1,6 +1,7 @@
 use core::time::Duration;
 extern crate alloc;
 use slint::SharedString;
+use alloc::vec;
 use vexide::{
     devices::{
         battery,
@@ -81,8 +82,8 @@ impl BlockCounter {
     pub fn new() -> Self {
         Self {
             block_count: 0,
-            detect_threshold: 0.5,
-            release_threshold: 0.1,
+            detect_threshold: 0.35,
+            release_threshold: 0.15,
             block_detected: false,
             last_count_time: Instant::now(),
             min_time_between_blocks: Duration::from_millis(40),

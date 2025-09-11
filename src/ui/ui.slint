@@ -51,77 +51,63 @@ export component VexSelector inherits Window {
                 alignment: start;
 
                 // alliance toggle
-                VerticalBox {
+                HorizontalBox {
                     spacing: 0px;
-                    alignment: LayoutAlignment.start;
-                    height: 48px;
+                    visible: true;
+                    padding: 8px;
+                    alignment: LayoutAlignment.space-between;
+                    height: 40px;
 
-                    HorizontalBox {
-                        spacing: 8px;
-                        alignment: LayoutAlignment.start;
-
-                        Text {
-                            text: is_red_alliance ? "RED" : "BLUE";
-                            min-width: 32px;
-                            horizontal-alignment: TextHorizontalAlignment.left;
-                            vertical-alignment: TextVerticalAlignment.center;
-                            color: is_red_alliance ? #ef4444 : #3b82f6;
-                            font-size: 12px;
-                            font-weight: 600;
-                            font-family: "JetBrains Mono";
-                        }
+                    Rectangle {
+                        width: 56px;
+                        height: 32px;
+                        background: is_red_alliance ? #ef4444 : #3b82f6;
+                        border-radius: 16px;
 
                         Rectangle {
-                            width: 40px;
-                            height: 24px;
-                            background: is_red_alliance ? #ef4444 : #3b82f6;
-                            border-radius: 12px;
-                            
-                            Rectangle {
-                                width: 20px;
-                                height: 20px;
-                                background: #f8fafc;
-                                border-radius: 10px;
-                                x: is_red_alliance ? 18px : 2px;
-                                y: 2px;
-                                
-                                animate x {
-                                    duration: 100ms;
-                                    easing: ease-out;
-                                }
-                            }
+                            width: 28px;
+                            height: 28px;
+                            background: #f8fafc;
+                            border-radius: 14px;
+                            x: is_red_alliance ? 26px : 2px;
+                            y: 2px;
 
-                            TouchArea {
-                                clicked => {
-                                    is_red_alliance = !is_red_alliance;
-                                }
+                            animate x {
+                                duration: 100ms;
+                                easing: ease-out;
                             }
                         }
-                        Rectangle {
-                            width: 24px;
-                            height: 24px;
-                            background: diagnostics_visible ? #475569 : #1e293b;
-                            border-radius: 4px;
-                            border-width: 1px;
-                            border-color: diagnostics_visible ? #64748b : #334155;
 
-                            animate background {
-                                duration: 150ms;
+                        TouchArea {
+                            clicked => {
+                                is_red_alliance = !is_red_alliance;
                             }
+                        }
+                    }
+                    Rectangle {
+                        width: 32px;
+                        height: 32px;
+                        background: diagnostics_visible ? #475569 : #1e293b;
+                        border-radius: 6px;
+                        border-width: 1px;
+                        border-color: diagnostics_visible ? #64748b : #334155;
 
-                            Image {
-                                source: @image-url("activity.svg");
-                                colorize: #f8fafc;
-                                width: 16px;
-                                height: 16px;
-                                x: (parent.width - self.width) / 2;
-                                y: (parent.height - self.height) / 2;
-                            }
+                        animate background {
+                            duration: 150ms;
+                        }
 
-                            TouchArea {
-                                clicked => {
-                                    diagnostics_visible = !diagnostics_visible;
-                                }
+                        Image {
+                            source: @image-url("activity.svg");
+                            colorize: #f8fafc;
+                            width: 20px;
+                            height: 20px;
+                            x: (parent.width - self.width) / 2;
+                            y: (parent.height - self.height) / 2;
+                        }
+
+                        TouchArea {
+                            clicked => {
+                                diagnostics_visible = !diagnostics_visible;
                             }
                         }
                     }
@@ -130,6 +116,7 @@ export component VexSelector inherits Window {
                 // route buttons
                 VerticalBox {
                     spacing: 6px;
+                    padding: 8px;
                     alignment: start;
 
                     for route[idx] in routes : Rectangle {
@@ -168,7 +155,7 @@ export component VexSelector inherits Window {
             }
         }
 
-        // right panel - field preview or console
+        // right panel - field preview or diagnostics
         Rectangle {
             VerticalBox {
                 spacing: 0px;

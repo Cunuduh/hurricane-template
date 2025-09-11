@@ -129,7 +129,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 };
                 if self.intake_mode == IntakeMode::Outtake {
                     self.outtake_initial_reverse_until =
-                        Some(Instant::now() + Duration::from_millis(175));
+                        Some(Instant::now() + Duration::from_millis(100));
                 }
             } else if r2_now {
                 self.intake_mode = match self.intake_mode {
@@ -138,7 +138,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 };
                 if self.intake_mode == IntakeMode::OuttakeMiddle {
                     self.outtake_middle_initial_reverse_until =
-                        Some(Instant::now() + Duration::from_millis(175));
+                        Some(Instant::now() + Duration::from_millis(100));
                 }
             } else if l2_now {
                 // L2 acts as a toggle ONLY when not running on top of other commands
@@ -248,7 +248,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let prox = self.optical_sensor.proximity().unwrap_or_default();
         let now = Instant::now();
         if self.block_counter.update(prox) && self.block_counter.block_count <= 5 {
-            let target = now + Duration::from_millis(250);
+            let target = now + Duration::from_millis(200);
             self.indexer_run_until = Some(match self.indexer_run_until {
                 Some(until) if until > target => until,
                 _ => target,
