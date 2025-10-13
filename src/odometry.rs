@@ -1,6 +1,6 @@
 use core::f64::consts::PI;
-use vexide::prelude::Float;
-use vexide::prelude::Position;
+
+use vexide::prelude::{Float, Position};
 
 pub trait Pos2Like {
     fn x(&self) -> f64;
@@ -37,7 +37,7 @@ impl Pos2Like for Pose {
     fn distance(&self, other: &Self) -> f64 {
         (self.x - other.x).hypot(self.y - other.y)
     }
-    fn lerp (&self, other: &Self, t: f64) -> Self {
+    fn lerp(&self, other: &Self, t: f64) -> Self {
         Self {
             x: self.x + (other.x - self.x) * t,
             y: self.y + (other.y - self.y) * t,
@@ -60,10 +60,7 @@ pub struct Odometry {
 }
 
 impl Odometry {
-    pub fn new(
-        initial_pose: Pose,
-        tracking_wheels: TrackingWheelConfig,
-    ) -> Self {
+    pub fn new(initial_pose: Pose, tracking_wheels: TrackingWheelConfig) -> Self {
         Self {
             pose: initial_pose,
             prev_parallel_revs: 0.0,
@@ -95,10 +92,8 @@ impl Odometry {
         let dx_robot = dp - dtheta * self.tracking_wheels.perpendicular_offset;
         let dy_robot = ds + dtheta * self.tracking_wheels.parallel_offset;
 
-        self.pose.x += dx_robot * self.pose.heading.cos()
-            - dy_robot * self.pose.heading.sin();
-        self.pose.y += dx_robot * self.pose.heading.sin()
-            + dy_robot * self.pose.heading.cos();
+        self.pose.x += dx_robot * self.pose.heading.cos() - dy_robot * self.pose.heading.sin();
+        self.pose.y += dx_robot * self.pose.heading.sin() + dy_robot * self.pose.heading.cos();
         self.pose.heading = theta;
     }
 

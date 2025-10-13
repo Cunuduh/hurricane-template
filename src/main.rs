@@ -2,6 +2,7 @@
 #![no_std]
 #![allow(incomplete_features)]
 #![feature(generic_const_exprs)]
+#![feature(portable_simd)]
 extern crate alloc;
 use core::{
     sync::atomic::{AtomicUsize, Ordering},
@@ -14,8 +15,10 @@ use crate::{
     chassis::{Chassis, ChassisArgs, ChassisConfig},
     odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
+    triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition},
 };
 static UI_SELECTED_ROUTE: AtomicUsize = AtomicUsize::new(0);
+static IS_RED_ALLIANCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 use vexide::fs;
 const AUTON_SAVE_PATH: &str = "auton.txt";
 use alloc::string::ToString;
@@ -23,6 +26,7 @@ use alloc::string::ToString;
 mod autonomous;
 mod chassis;
 mod driver_control;
+mod mcl;
 mod motion_controller;
 mod odometry;
 mod pid;
@@ -33,6 +37,127 @@ mod utils;
 
 slint::include_modules!();
 use slint::ComponentHandle;
+
+const AUTON_TRIGGER_DEFINITIONS: &[TriggerDefinition] = &[
+    TriggerDefinition {
+        name: "intake",
+        actions: &[TriggerAction::Intake(IntakeCommand::Intake)],
+    },
+    TriggerDefinition {
+        name: "outtake",
+        actions: &[TriggerAction::Intake(IntakeCommand::Outtake)],
+    },
+    TriggerDefinition {
+        name: "outtake_middle",
+        actions: &[TriggerAction::Intake(IntakeCommand::OuttakeMiddle)],
+    },
+    TriggerDefinition {
+        name: "intake_reverse",
+        actions: &[TriggerAction::Intake(IntakeCommand::Reverse)],
+    },
+    TriggerDefinition {
+        name: "intake_stop",
+        actions: &[TriggerAction::Intake(IntakeCommand::Stop)],
+    },
+    TriggerDefinition {
+        name: "scraper_up",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::Scraper,
+            state: false,
+        }],
+    },
+    TriggerDefinition {
+        name: "scraper_down",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::Scraper,
+            state: true,
+        }],
+    },
+    TriggerDefinition {
+        name: "scraper_toggle",
+        actions: &[TriggerAction::TogglePneumatic(PneumaticTarget::Scraper)],
+    },
+    TriggerDefinition {
+        name: "wings_open",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::Wings,
+            state: true,
+        }],
+    },
+    TriggerDefinition {
+        name: "wings_close",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::Wings,
+            state: false,
+        }],
+    },
+    TriggerDefinition {
+        name: "wings_toggle",
+        actions: &[TriggerAction::TogglePneumatic(PneumaticTarget::Wings)],
+    },
+    TriggerDefinition {
+        name: "block_park_up",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::BlockPark,
+            state: true,
+        }],
+    },
+    TriggerDefinition {
+        name: "block_park_down",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::BlockPark,
+            state: false,
+        }],
+    },
+    TriggerDefinition {
+        name: "block_park_toggle",
+        actions: &[TriggerAction::TogglePneumatic(PneumaticTarget::BlockPark)],
+    },
+    TriggerDefinition {
+        name: "hood_high",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::Hood,
+            state: true,
+        }],
+    },
+    TriggerDefinition {
+        name: "hood_low",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::Hood,
+            state: false,
+        }],
+    },
+    TriggerDefinition {
+        name: "hood_toggle",
+        actions: &[TriggerAction::TogglePneumatic(PneumaticTarget::Hood)],
+    },
+    TriggerDefinition {
+        name: "colour_sort_open",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::ColourSort,
+            state: true,
+        }],
+    },
+    TriggerDefinition {
+        name: "colour_sort_close",
+        actions: &[TriggerAction::SetPneumatic {
+            target: PneumaticTarget::ColourSort,
+            state: false,
+        }],
+    },
+    TriggerDefinition {
+        name: "colour_sort_toggle",
+        actions: &[TriggerAction::TogglePneumatic(PneumaticTarget::ColourSort)],
+    },
+    TriggerDefinition {
+        name: "colour_sort_enable",
+        actions: &[TriggerAction::SetColourSortEnabled(true)],
+    },
+    TriggerDefinition {
+        name: "colour_sort_disable",
+        actions: &[TriggerAction::SetColourSortEnabled(false)],
+    },
+];
 
 #[vexide::main]
 async fn main(peripherals: Peripherals) {
@@ -48,6 +173,17 @@ async fn main(peripherals: Peripherals) {
             let _ = fs::write(AUTON_SAVE_PATH, i.to_string().as_bytes());
         }
     });
+    
+    let ui_clone = ui.as_weak();
+    vexide::task::spawn(async move {
+        loop {
+            if let Some(ui_handle) = ui_clone.upgrade() {
+                let is_red = ui_handle.get_is_red_alliance();
+                IS_RED_ALLIANCE.store(is_red, Ordering::Relaxed);
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+    }).detach();
     // set routes from embedded routines
     {
         let names = routines::list_names();
@@ -161,9 +297,19 @@ impl Robot {
         ];
         let scraper = AdiDigitalOut::new(peripherals.take_adi_port(1).expect("adi port A"));
         let hood = AdiDigitalOut::new(peripherals.take_adi_port(2).expect("adi port B"));
-        let colour_sort = AdiDigitalOut::new(peripherals.take_adi_port(3).expect("adi port C"));
+        let wings = AdiDigitalOut::new(peripherals.take_adi_port(3).expect("adi port C"));
+        let block_park = AdiDigitalOut::new(peripherals.take_adi_port(4).expect("adi port D"));
+        let colour_sort = AdiDigitalOut::new(peripherals.take_adi_port(5).expect("adi port E"));
         let optical_sensor =
             OpticalSensor::new(peripherals.take_smart_port(13).expect("smart port 13"));
+        let dist_back =
+            DistanceSensor::new(peripherals.take_smart_port(14).expect("smart port 14"));
+        let dist_left =
+            DistanceSensor::new(peripherals.take_smart_port(15).expect("smart port 15"));
+        let dist_front =
+            DistanceSensor::new(peripherals.take_smart_port(16).expect("smart port 16"));
+        let dist_right =
+            DistanceSensor::new(peripherals.take_smart_port(17).expect("smart port 17"));
         let tw_config = TrackingWheelConfig {
             parallel_offset: 0.302,
             perpendicular_offset: -0.021,
@@ -171,7 +317,7 @@ impl Robot {
         };
 
         let drive_pid = Pid::new(6.0, 0.0, 0.5, 0.0, 0.0);
-        let turn_pid = Pid::new(6.0, 0.0, 0.01, 0.0, 0.0);
+        let turn_pid = Pid::new(9.0, 0.0, 0.05, 0.0, 2.0_f64.to_radians());
         let heading_pid = Pid::new(3.0, 0.0, 0.0, 0.0, 0.0);
 
         let config = ChassisConfig {
@@ -185,9 +331,9 @@ impl Robot {
             track_width: 18.0,
             max_volts: 12.0,
             dt: Duration::from_millis(10),
-            drive_pid,
             turn_pid,
             heading_pid,
+            drive_pid,
             small_drive_exit_error: 1.0,
             small_drive_settle_time: Duration::from_millis(50),
             big_drive_exit_error: 3.0,
@@ -205,9 +351,6 @@ impl Robot {
             accel_t: 0.5,
             tw_config,
         };
-        let triggers: &'static [(&'static str, fn())] = &[("do something", || {
-            println!("Triggered: do something");
-        })];
         let chassis = Chassis::new(ChassisArgs {
             controller: peripherals
                 .take_primary_controller()
@@ -219,11 +362,17 @@ impl Robot {
             intake_motors,
             scraper,
             hood,
+            wings,
+            block_park,
             colour_sort,
             imu,
             optical_sensor,
+            dist_front,
+            dist_right,
+            dist_back,
+            dist_left,
             config,
-            triggers,
+            triggers: AUTON_TRIGGER_DEFINITIONS,
             ui,
         })
         .await;
@@ -236,7 +385,8 @@ impl Compete for Robot {
     async fn autonomous(&mut self) {
         self.chassis.odometry.reset(Default::default());
         let _ = self.chassis.imu.reset_heading();
-        let routines = routines::load_all();
+        let is_red = IS_RED_ALLIANCE.load(Ordering::Relaxed);
+        let routines = routines::load_all(is_red);
         let idx = UI_SELECTED_ROUTE.load(Ordering::Relaxed);
         if routines.is_empty() {
             return;
@@ -250,11 +400,28 @@ impl Compete for Robot {
         loop {
             let c_state = self.chassis.controller.state().unwrap_or_default();
             self.chassis.cheesy_control(&c_state);
-            self.chassis.handle_intake_outtake_controls(&c_state);
-            self.chassis.toggle_scraper(&c_state);
-            if c_state.button_b.is_pressed() {
-                self.chassis.calibrate_tracking_wheels().await;
+            self.chassis.handle_intake_subsystem(
+                c_state.button_l1.is_now_pressed(),
+                c_state.button_l2.is_now_pressed(),
+                c_state.button_l2.is_pressed(),
+                c_state.button_r1.is_now_pressed(),
+                c_state.button_r2.is_now_pressed(),
+            );
+            if c_state.button_a.is_now_pressed() {
+                self.chassis.toggle_scraper();
             }
+            if c_state.button_b.is_now_pressed() {
+                self.chassis.toggle_wings();
+            }
+            if c_state.button_y.is_now_pressed() {
+                self.chassis.toggle_block_park();
+            }
+            if c_state.button_l1.is_now_pressed() {
+                self.chassis.toggle_hood();
+            }
+            // if c_state.button_b.is_pressed() {
+            //     self.chassis.calibrate_tracking_wheels().await;
+            // }
             sleep(self.chassis.config.dt).await;
         }
     }

@@ -10,7 +10,10 @@ use crate::{
     chassis::PoseSettings,
     motion_controller::{ProfilePoint, compute_motion_profile},
     odometry::Pose,
-    utils::{normalize_angle, path::interpolate_catmull_rom},
+    utils::{
+        normalize_angle,
+        path::{interpolate_boomerang, interpolate_catmull_rom},
+    },
 };
 
 struct Segment {
@@ -20,12 +23,6 @@ struct Segment {
 }
 
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
-    pub async fn drive_ptp(&mut self, points: &[(Pose, PoseSettings)]) {
-        for (i, (pose, settings)) in points.iter().enumerate() {
-            self.drive_to_point(pose.x, pose.y, *settings).await;
-            self.triggers.check_index(i);
-        }
-    }
     pub async fn drive_ramsete_catmull_rom(
         &mut self,
         path_waypoints: &[(Pose, PoseSettings)],
@@ -34,6 +31,24 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         zeta: f64,
     ) {
         let interpolated_path = interpolate_catmull_rom(path_waypoints, steps);
+        let initialized_profile =
+            compute_motion_profile::<L, R, I>(self, interpolated_path, path_waypoints);
+        let profile = initialized_profile.profile_points;
+        let times = initialized_profile.times;
+        let total_time = initialized_profile.total_time;
+
+        self.execute_ramsete_profile(profile, times, total_time, b, zeta, steps)
+            .await;
+    }
+
+    pub async fn drive_boomerang(
+        &mut self,
+        path_waypoints: &[(Pose, PoseSettings)],
+        steps: usize,
+        b: f64,
+        zeta: f64,
+    ) {
+        let interpolated_path = interpolate_boomerang(path_waypoints, steps);
         let initialized_profile =
             compute_motion_profile::<L, R, I>(self, interpolated_path, path_waypoints);
         let profile = initialized_profile.profile_points;
@@ -95,12 +110,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             last_time = now;
             let elapsed = now.duration_since(start_time).as_secs_f64();
             self.update_state();
+            self.service_autonomous_intake();
             if now.duration_since(start_time) >= safety_timeout {
                 println!("ramsete: timeout");
                 break;
             }
 
-            let current = self.odometry.pose();
+            let current = self.mcl_pose();
             let goal = profile.last().unwrap().point;
             let dx_end = goal.x - current.x;
             let dy_end = goal.y - current.y;
@@ -152,7 +168,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 };
 
                 if Some(wp_idx) != last_wp && wp_idx > 0 {
-                    self.triggers.check_index(wp_idx);
+                    let actions = self.triggers.check_index(wp_idx);
+                    self.apply_trigger_actions(&actions);
                     last_wp = Some(wp_idx);
                 }
             }
@@ -169,9 +186,19 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 (((elapsed - t0) / seg_data.t).clamp(0.0, 1.0), seg_data.w_d)
             };
 
+            let max_voltage_0 = profile[i].max_voltage.min(self.config.max_volts);
+            let max_voltage_1 = profile[i + 1].max_voltage.min(self.config.max_volts);
+            let seg_max_voltage = if max_voltage_0 <= 0.0 && max_voltage_1 <= 0.0 {
+                0.0
+            } else {
+                let interpolated = max_voltage_0 + (max_voltage_1 - max_voltage_0) * tau;
+                interpolated.clamp(0.0, self.config.max_volts)
+            };
+
             let traveled =
                 profile[i].distance + (profile[i + 1].distance - profile[i].distance) * tau;
-            self.triggers.check_distance(traveled);
+            let actions = self.triggers.check_distance(traveled);
+            self.apply_trigger_actions(&actions);
 
             let x_d = p0.x + (p1.x - p0.x) * tau;
             let y_d = p0.y + (p1.y - p0.y) * tau;
@@ -184,7 +211,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let reversed = if profile[i].is_reversed { -1.0 } else { 1.0 };
             let v_d = (v0 + (v1 - v0) * tau) * reversed;
 
-            let pose = self.odometry.pose();
+            let pose = self.mcl_pose();
             let dx = x_d - pose.x;
             let dy = y_d - pose.y;
             let e_x = dx * pose.heading.cos() + dy * pose.heading.sin();
@@ -204,14 +231,27 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let v = v_d * e_theta.cos() + k * e_x;
             let w = w_d + k * e_theta + b * v_d * sinc(e_theta) * e_y;
 
-            let wheel_vel_l = v + w * self.config.track_width / 2.0;
-            let wheel_vel_r = v - w * self.config.track_width / 2.0;
+            let wheel_vel_l = v - w * self.config.track_width / 2.0;
+            let wheel_vel_r = v + w * self.config.track_width / 2.0;
             let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0)
                 * (self.config.wheel_diameter * PI);
-            let vl = (wheel_vel_l / max_linear_vel * self.config.max_volts)
-                .clamp(-self.config.max_volts, self.config.max_volts);
-            let vr = (wheel_vel_r / max_linear_vel * self.config.max_volts)
-                .clamp(-self.config.max_volts, self.config.max_volts);
+            let mut target_vl = (wheel_vel_l / max_linear_vel) * self.config.max_volts;
+            let mut target_vr = (wheel_vel_r / max_linear_vel) * self.config.max_volts;
+
+            if seg_max_voltage <= 0.0 {
+                target_vl = 0.0;
+                target_vr = 0.0;
+            } else {
+                let peak = target_vl.abs().max(target_vr.abs());
+                if peak > seg_max_voltage {
+                    let scale = seg_max_voltage / peak;
+                    target_vl *= scale;
+                    target_vr *= scale;
+                }
+            }
+
+            let vl = target_vl.clamp(-self.config.max_volts, self.config.max_volts);
+            let vr = target_vr.clamp(-self.config.max_volts, self.config.max_volts);
             if vl.abs().max(vr.abs()) >= 3.0 && self.check_stall() {
                 println!("ramsete: stall detected");
                 break;
@@ -232,40 +272,204 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
     }
 
+    pub async fn drive_linear(&mut self, points: &[(Pose, PoseSettings)]) {
+        if points.is_empty() {
+            return;
+        }
+        let settings = points.last().unwrap().1;
+        let target = points.last().unwrap().0;
+        let mut heading_pid = self.config.heading_pid;
+        let mut drive_pid = self.config.drive_pid;
+        heading_pid.reset();
+        drive_pid.reset();
+        self.stall_timer = None;
+
+        self.update_state();
+        let start_pose = self.mcl_pose();
+        
+        let initial_heading = if settings.is_reversed {
+            normalize_angle(start_pose.heading + PI)
+        } else {
+            start_pose.heading
+        };
+        
+        let drive_direction = if settings.is_reversed { -1.0 } else { 1.0 };
+        
+        let dx = target.x - start_pose.x;
+        let dy = target.y - start_pose.y;
+        let total_dist = dx.hypot(dy);
+        let (t_dir_x, t_dir_y) = if total_dist > 1e-6 {
+            (dx / total_dist, dy / total_dist)
+        } else {
+            (initial_heading.cos(), initial_heading.sin())
+        };
+        if total_dist < self.config.small_drive_exit_error {
+            return;
+        }
+
+        let mut last_time = Instant::now();
+        let start_time = last_time;
+        let safety_timeout =
+            Duration::from_millis(((total_dist / 0.1) as u64).saturating_add(5000));
+
+        let mut small_timer: Option<Instant> = None;
+        let mut big_timer: Option<Instant> = None;
+        let mut last_progress: f64 = 0.0;
+        let mut last_progress_time = start_time;
+
+        loop {
+            let now = Instant::now();
+            let dt = now.duration_since(last_time).as_secs_f64();
+            if dt < self.config.dt.as_secs_f64() {
+                sleep(self.config.dt - now.duration_since(last_time)).await;
+                continue;
+            }
+            last_time = now;
+
+            self.update_state();
+            self.service_autonomous_intake();
+            if now.duration_since(start_time) >= safety_timeout {
+                println!("drive_linear: timeout");
+                break;
+            }
+
+            let pose = self.mcl_pose();
+            let cx = pose.x - start_pose.x;
+            let cy = pose.y - start_pose.y;
+            let traveled_along = cx * t_dir_x + cy * t_dir_y;
+            let error = total_dist - traveled_along; // signed: < 0 when overshot
+            let error_abs = error.abs();
+
+            let progress = traveled_along.clamp(0.0, total_dist);
+            let actions = self.triggers.check_distance(progress);
+            self.apply_trigger_actions(&actions);
+
+            if error_abs <= self.config.small_drive_exit_error {
+                big_timer = None;
+                if small_timer.is_none() {
+                    small_timer = Some(Instant::now());
+                }
+                if let Some(t) = small_timer
+                    && t.elapsed() >= self.config.small_drive_settle_time
+                {
+                    println!("drive_linear: done (small error)");
+                    break;
+                }
+            } else {
+                small_timer = None;
+                if error_abs <= self.config.big_drive_exit_error {
+                    if big_timer.is_none() {
+                        big_timer = Some(Instant::now());
+                    }
+                    if let Some(t) = big_timer
+                        && t.elapsed() >= self.config.big_drive_settle_time
+                    {
+                        println!("drive_linear: done (big error)");
+                        break;
+                    }
+                } else {
+                    big_timer = None;
+                }
+            }
+
+            if self.check_stall() {
+                println!("drive_linear: stall detected");
+                break;
+            }
+
+            // try to maintain the initial heading for straight-line driving with small corrections
+            let heading_error = normalize_angle(initial_heading - pose.heading);
+            let heading_correction = heading_pid
+                .next(heading_error, dt)
+                .clamp(-settings.max_voltage, settings.max_voltage);
+
+            let drive_output = drive_pid
+                .next(error, dt)
+                .clamp(-settings.max_voltage, settings.max_voltage)
+                * drive_direction;
+
+            if progress > last_progress + 0.05 {
+                last_progress = progress;
+                last_progress_time = now;
+            } else if now.duration_since(last_progress_time) > Duration::from_millis(700)
+                && drive_output.abs() > 1.0
+            {
+                println!("drive_linear: no progress");
+                break;
+            }
+
+            // compute motor voltages combining forward drive and heading correction
+            let left_v = (drive_output - heading_correction)
+                .clamp(-self.config.max_volts, self.config.max_volts);
+            let right_v = (drive_output + heading_correction)
+                .clamp(-self.config.max_volts, self.config.max_volts);
+
+            for m in self.left_motors.iter_mut() {
+                let _ = m.set_voltage(left_v);
+            }
+            for m in self.right_motors.iter_mut() {
+                let _ = m.set_voltage(right_v);
+            }
+        }
+
+        for m in self
+            .left_motors
+            .iter_mut()
+            .chain(self.right_motors.iter_mut())
+        {
+            let _ = m.brake(BrakeMode::Hold);
+        }
+    }
+
+    pub async fn drive_ptp(&mut self, points: &[(Pose, PoseSettings)]) {
+        if points.is_empty() {
+            return;
+        }
+        self.update_state();
+        let pose = self.mcl_pose();
+        let (first_pose, first_settings) = points[0];
+        let dx = first_pose.x - pose.x;
+        let dy = first_pose.y - pose.y;
+        let dist = dx.hypot(dy);
+        if dist > self.config.big_drive_exit_error {
+            self.drive_to_point(first_pose.x, first_pose.y, first_settings)
+                .await;
+        }
+        self.drive_linear(points).await;
+    }
+
     pub async fn drive_to_point(&mut self, target_x: f64, target_y: f64, settings: PoseSettings) {
         self.update_state();
-        let pose_before_turn = self.odometry.pose();
-        let angle_to_target = (target_y - pose_before_turn.y).atan2(target_x - pose_before_turn.x);
-
-        let target_orientation = if settings.is_reversed {
-            normalize_angle(angle_to_target + PI)
-        } else {
-            angle_to_target
-        };
-
-        self.turn_to_angle(target_orientation.to_degrees(), settings.max_voltage)
-            .await;
+        let pose = self.mcl_pose();
+        let mut turn_heading = (target_y - pose.y).atan2(target_x - pose.x);
+        if settings.is_reversed {
+            turn_heading = normalize_angle(turn_heading + PI);
+        }
+        let turn_v = settings.max_voltage.min(self.config.max_volts).max(1.0);
+        let heading_delta = normalize_angle(turn_heading - self.mcl_pose().heading);
+        if heading_delta.abs().to_degrees() > self.config.small_turn_exit_error {
+            self.turn_to_angle(turn_heading.to_degrees(), turn_v).await;
+        }
 
         self.update_state();
-        let pose_after_turn = self.odometry.pose();
-        let dx = target_x - pose_after_turn.x;
-        let dy = target_y - pose_after_turn.y;
-        let dist_to_target = dx.hypot(dy);
-
-        let drive_dist = if settings.is_reversed {
-            -dist_to_target
-        } else {
-            dist_to_target
+        let start = self.mcl_pose();
+        let start_pose = Pose {
+            x: start.x,
+            y: start.y,
+            heading: start.heading,
         };
-
-        if drive_dist.abs() > 0.01 {
-            self.drive_straight(drive_dist, settings.max_voltage).await;
-        }
+        let end_pose = Pose {
+            x: target_x,
+            y: target_y,
+            heading: start.heading,
+        };
+        let path: [(Pose, PoseSettings); 2] = [(start_pose, settings), (end_pose, settings)];
+        self.drive_linear(&path).await;
     }
 
     pub async fn turn_to_point(&mut self, x: f64, y: f64, v: f64) {
         self.update_state();
-        let p = self.odometry.pose();
+        let p = self.mcl_pose();
         let a = (y - p.y).atan2(x - p.x);
         self.turn_to_angle(a.to_degrees(), v).await;
     }
@@ -275,10 +479,16 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         pid.reset();
         self.stall_timer = None;
         let a = normalize_angle(a_deg.to_radians());
-        let initial_heading = self.odometry.pose().heading;
+        let initial_heading = self.mcl_pose().heading;
         let mut t0 = Instant::now();
         let mut ts: Option<Instant> = None;
         let mut tb: Option<Instant> = None;
+        let start_time = Instant::now();
+        let safety_timeout = Duration::from_millis(3000);
+
+        let pid_min_error_deg = pid.min_error.to_degrees();
+        let small_exit_deg = self.config.small_turn_exit_error.max(pid_min_error_deg);
+        let big_exit_deg = self.config.big_turn_exit_error.max(pid_min_error_deg);
 
         loop {
             let t = Instant::now();
@@ -291,9 +501,15 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             t0 = t;
 
             self.update_state();
-            let h = self.odometry.pose().heading;
+            self.service_autonomous_intake();
+            if t.duration_since(start_time) >= safety_timeout {
+                println!("turn_to_angle: timeout");
+                break;
+            }
+            let h = self.mcl_pose().heading;
             let dh = normalize_angle(h - initial_heading);
-            self.triggers.check_angle(dh.to_degrees());
+            let actions = self.triggers.check_angle(dh.to_degrees());
+            self.apply_trigger_actions(&actions);
             let e = normalize_angle(a - h);
 
             if self.check_stall() {
@@ -302,7 +518,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
 
             let e2 = e.to_degrees().abs();
-            if e2 <= self.config.small_turn_exit_error {
+            if e2 <= small_exit_deg {
                 tb = None;
                 if ts.is_none() {
                     ts = Some(Instant::now());
@@ -315,7 +531,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             } else {
                 ts = None;
-                if e2 <= self.config.big_turn_exit_error {
+                if e2 <= big_exit_deg {
                     if tb.is_none() {
                         tb = Some(Instant::now());
                     }
@@ -329,12 +545,16 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     tb = None;
                 }
             }
-            let u = pid.next(e, dt).clamp(-v, v);
+            let mut u = pid.next(e, dt);
+            if e2 > big_exit_deg && u.abs() < 1.0 {
+                u = 1.0 * e.signum(); // minimum voltage to overcome static friction
+            }
+            let u = u.clamp(-v, v);
             for m in self.left_motors.iter_mut() {
-                let _ = m.set_voltage(u);
+                let _ = m.set_voltage(-u);
             }
             for m in self.right_motors.iter_mut() {
-                let _ = m.set_voltage(-u);
+                let _ = m.set_voltage(u);
             }
         }
 
@@ -369,7 +589,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             sleep(Duration::from_millis(250)).await;
 
             let imu_start = 0.0;
-            let imu_end = self.imu.rotation().unwrap_or_default().to_radians();
+            let imu_end = -self.imu.rotation().unwrap_or_default().to_radians();
             let t_delta = normalize_angle(imu_end - imu_start);
 
             let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
@@ -397,91 +617,25 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     pub async fn drive_straight(&mut self, target_dist: f64, max_voltage: f64) {
-        let mut drive_pid = self.config.drive_pid;
-        let mut heading_pid = self.config.heading_pid;
-        drive_pid.reset();
-        heading_pid.reset();
-        self.stall_timer = None;
-
-        let initial_pose = self.odometry.pose();
-        let initial_heading = initial_pose.heading;
-        let mut last_time = Instant::now();
-        let mut small_error_timer: Option<Instant> = None;
-        let mut big_error_timer: Option<Instant> = None;
-
-        loop {
-            let now = Instant::now();
-            let dt = now.duration_since(last_time).as_secs_f64();
-            if dt < self.config.dt.as_secs_f64() {
-                sleep(self.config.dt - now.duration_since(last_time)).await;
-                continue;
-            }
-            last_time = now;
-
-            self.update_state();
-            if self.check_stall() {
-                println!("drive_straight: stall detected");
-                break;
-            }
-
-            let current = self.odometry.pose();
-            let dx = current.x - initial_pose.x;
-            let dy = current.y - initial_pose.y;
-            let traveled =
-                (dx.hypot(dy)) * (dx * initial_heading.cos() + dy * initial_heading.sin()).signum();
-            self.triggers.check_distance(traveled.abs());
-
-            let err = target_dist - traveled;
-            if err.abs() <= self.config.small_drive_exit_error {
-                big_error_timer = None;
-                if small_error_timer.is_none() {
-                    small_error_timer = Some(Instant::now());
-                }
-                if let Some(t) = small_error_timer
-                    && t.elapsed() >= self.config.small_drive_settle_time
-                {
-                    println!("drive_straight: done (small error)");
-                    break;
-                }
-            } else {
-                small_error_timer = None;
-                if err.abs() <= self.config.big_drive_exit_error {
-                    if big_error_timer.is_none() {
-                        big_error_timer = Some(Instant::now());
-                    }
-                    if let Some(t) = big_error_timer
-                        && t.elapsed() >= self.config.big_drive_settle_time
-                    {
-                        println!("drive_straight: done (big error)");
-                        break;
-                    }
-                } else {
-                    big_error_timer = None;
-                }
-            }
-
-            let u = drive_pid.next(err, dt);
-            let heading_error = normalize_angle(initial_heading - current.heading);
-            let tc = heading_pid
-                .next(heading_error, dt)
-                .clamp(-self.config.max_volts, self.config.max_volts);
-
-            let vl = (u + tc).clamp(-max_voltage, max_voltage);
-            let vr = (u - tc).clamp(-max_voltage, max_voltage);
-            for m in self.left_motors.iter_mut() {
-                let _ = m.set_voltage(vl);
-            }
-            for m in self.right_motors.iter_mut() {
-                let _ = m.set_voltage(vr);
-            }
-        }
-
-        for m in self
-            .left_motors
-            .iter_mut()
-            .chain(self.right_motors.iter_mut())
-        {
-            let _ = m.brake(BrakeMode::Hold);
-        }
+        self.update_state();
+        let start = self.odometry.pose();
+        let dx = start.heading.cos() * target_dist;
+        let dy = start.heading.sin() * target_dist;
+        let start_pose = Pose {
+            x: start.x,
+            y: start.y,
+            heading: start.heading,
+        };
+        let end_pose = Pose {
+            x: start.x + dx,
+            y: start.y + dy,
+            heading: start.heading,
+        };
+        let settings = PoseSettings {
+            is_reversed: target_dist.is_sign_negative(),
+            max_voltage,
+        };
+        let path: [(Pose, PoseSettings); 2] = [(start_pose, settings), (end_pose, settings)];
+        self.drive_linear(&path).await;
     }
 }

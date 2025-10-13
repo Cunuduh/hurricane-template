@@ -1,6 +1,6 @@
 use core::{f64::consts::PI, time::Duration};
 
-use super::chassis::{Chassis, IntakeMode};
+use super::chassis::{Chassis, DetectedColour, IntakeMode};
 extern crate alloc;
 use vexide::{prelude::*, time::Instant};
 
@@ -85,31 +85,136 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let _ = m.set_voltage(vr);
         }
     }
-    pub fn toggle_scraper(&mut self, c_state: &vexide::devices::controller::ControllerState) {
-        if c_state.button_a.is_now_pressed() {
-            let _ = self.scraper.toggle();
+    pub fn toggle_scraper(&mut self) {
+        let _ = self.scraper.toggle();
+    }
+    pub fn toggle_wings(&mut self) {
+        let _ = self.wings.toggle();
+    }
+    pub fn toggle_block_park(&mut self) {
+        let _ = self.block_park.toggle();
+    }
+    pub fn toggle_colour_sort(&mut self) {
+        self.colour_sort_enabled = !self.colour_sort_enabled;
+        if !self.colour_sort_enabled {
+            self.colour_sort_activation_time = None;
+            self.colour_sort_run_until = None;
+            self.set_colour_sort_state(false);
         }
     }
-    pub fn handle_intake_outtake_controls(&mut self, c_state: &vexide::devices::controller::ControllerState) {
-        let l1_now = c_state.button_l1.is_now_pressed();
-        let l2_now = c_state.button_l2.is_now_pressed();
-        let l2_held = c_state.button_l2.is_pressed();
-        let r1_now = c_state.button_r1.is_now_pressed();
-        let r2_now = c_state.button_r2.is_now_pressed();
 
+    fn hue_is_red(hue: f64) -> bool {
+        let h = hue.rem_euclid(360.0);
+        !(60.0..300.0).contains(&h)
+    }
+    fn hue_is_blue(hue: f64) -> bool {
+        let h = hue.rem_euclid(360.0);
+        (180.0..300.0).contains(&h)
+    }
+    fn set_colour_sort_state(&mut self, high: bool) {
+        if high {
+            let _ = self.colour_sort.set_high();
+        } else {
+            let _ = self.colour_sort.set_low();
+        }
+    }
+    fn update_colour_sort(&mut self, detected_colour: DetectedColour, now: Instant) {
+        self.last_detected_colour = detected_colour;
+
+        if !self.colour_sort_enabled {
+            self.colour_sort_activation_time = None;
+            self.colour_sort_run_until = None;
+            self.set_colour_sort_state(false);
+            return;
+        }
+
+        let enemy_detected = match detected_colour {
+            DetectedColour::Red => !self.team_is_red,
+            DetectedColour::Blue => self.team_is_red,
+            DetectedColour::Unknown => false,
+        };
+
+        if enemy_detected {
+            const ACTIVATION_DELAY_MS: u64 = 75;
+            const PULSE_DURATION_MS: u64 = 150;
+            let activation_delay = Duration::from_millis(ACTIVATION_DELAY_MS);
+            let pulse_duration = Duration::from_millis(PULSE_DURATION_MS);
+
+            let mut activation_time_opt = self.colour_sort_activation_time;
+            let currently_running = self.colour_sort_activation_time.is_none()
+                && matches!(self.colour_sort_run_until, Some(until) if now < until);
+
+            let activation_time = if currently_running {
+                activation_time_opt = None;
+                now
+            } else {
+                match activation_time_opt {
+                    Some(existing) => existing,
+                    None => {
+                        let activation = now + activation_delay;
+                        activation_time_opt = Some(activation);
+                        activation
+                    }
+                }
+            };
+
+            let base_end = self
+                .colour_sort_run_until
+                .unwrap_or(activation_time.max(now));
+            let new_run_end = base_end.max(activation_time) + pulse_duration;
+            self.colour_sort_run_until = Some(new_run_end);
+            self.colour_sort_activation_time = activation_time_opt;
+        }
+
+        if let Some(run_until) = self.colour_sort_run_until {
+            if now >= run_until {
+                self.colour_sort_run_until = None;
+                self.colour_sort_activation_time = None;
+                self.set_colour_sort_state(false);
+            } else if let Some(activation_time) = self.colour_sort_activation_time {
+                if now >= activation_time {
+                    self.colour_sort_activation_time = None;
+                    self.set_colour_sort_state(true);
+                } else {
+                    self.set_colour_sort_state(false);
+                }
+            } else {
+                self.set_colour_sort_state(true);
+            }
+        } else if !enemy_detected {
+            self.set_colour_sort_state(false);
+        }
+    }
+    pub fn toggle_hood(&mut self) {
+        let _ = self.hood.toggle();
+    }
+    pub fn handle_intake_subsystem(
+        &mut self,
+        intake_toggle_pressed: bool,
+        reverse_toggle_pressed: bool,
+        reverse_held: bool,
+        outtake_toggle_pressed: bool,
+        outtake_middle_toggle_pressed: bool,
+    ) {
         let any_timers = self.outtake_initial_reverse_until.is_some()
             || self.outtake_jam_reverse_until.is_some()
             || self.outtake_middle_initial_reverse_until.is_some()
             || self.outtake_middle_jam_reverse_until.is_some();
         let any_running = self.intake_mode != IntakeMode::Idle || any_timers;
 
-        if (l1_now || r1_now || r2_now || l2_now) && any_running {
+        if (intake_toggle_pressed
+            || outtake_toggle_pressed
+            || outtake_middle_toggle_pressed
+            || reverse_toggle_pressed)
+            && any_running
+        {
             self.intake_mode = IntakeMode::Idle;
             self.outtake_initial_reverse_until = None;
             self.outtake_jam_reverse_until = None;
             self.outtake_middle_initial_reverse_until = None;
             self.outtake_middle_jam_reverse_until = None;
             self.indexer_run_until = None;
+            self.indexer_pending_activation_until = None;
             for m in self.intake_motors.iter_mut() {
                 let _ = m.set_voltage(0.0);
             }
@@ -117,12 +222,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
 
         if !any_running {
-            if l1_now {
+            if intake_toggle_pressed {
                 self.intake_mode = match self.intake_mode {
                     IntakeMode::Intake => IntakeMode::Idle,
                     _ => IntakeMode::Intake,
                 };
-            } else if r1_now {
+            } else if outtake_toggle_pressed {
                 self.intake_mode = match self.intake_mode {
                     IntakeMode::Outtake => IntakeMode::Idle,
                     _ => IntakeMode::Outtake,
@@ -131,7 +236,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.outtake_initial_reverse_until =
                         Some(Instant::now() + Duration::from_millis(100));
                 }
-            } else if r2_now {
+            } else if outtake_middle_toggle_pressed {
                 self.intake_mode = match self.intake_mode {
                     IntakeMode::OuttakeMiddle => IntakeMode::Idle,
                     _ => IntakeMode::OuttakeMiddle,
@@ -140,7 +245,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.outtake_middle_initial_reverse_until =
                         Some(Instant::now() + Duration::from_millis(100));
                 }
-            } else if l2_now {
+            } else if reverse_toggle_pressed {
                 // L2 acts as a toggle ONLY when not running on top of other commands
                 self.intake_mode = match self.intake_mode {
                     IntakeMode::Reverse => IntakeMode::Idle,
@@ -149,7 +254,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
         }
 
-        if l2_held {
+        if reverse_held {
             for m in self.intake_motors.iter_mut() {
                 let _ = m.set_voltage(-12.0);
             }
@@ -175,8 +280,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let reversing_outtake_middle = self.outtake_middle_initial_reverse_until.is_some()
             || self.outtake_middle_jam_reverse_until.is_some();
 
-        let outtake_middle_active = matches!(self.intake_mode, IntakeMode::OuttakeMiddle)
-            || reversing_outtake_middle;
+        let outtake_middle_active =
+            matches!(self.intake_mode, IntakeMode::OuttakeMiddle) || reversing_outtake_middle;
         if outtake_middle_active && self.apply_outtake_middle(reversing_outtake_middle) {
             return;
         }
@@ -195,6 +300,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
 
         self.stop_all();
+    }
+
+    pub fn service_autonomous_intake(&mut self) {
+        self.handle_intake_subsystem(false, false, false, false, false);
     }
 
     fn stop_all(&mut self) {
@@ -246,13 +355,39 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
     fn apply_intake(&mut self) -> bool {
         let prox = self.optical_sensor.proximity().unwrap_or_default();
+        let hue = self.optical_sensor.hue().unwrap_or_default();
         let now = Instant::now();
-        if self.block_counter.update(prox) && self.block_counter.block_count <= 5 {
-            let target = now + Duration::from_millis(200);
-            self.indexer_run_until = Some(match self.indexer_run_until {
-                Some(until) if until > target => until,
-                _ => target,
-            });
+
+        let detected_colour = if Self::hue_is_red(hue) {
+            DetectedColour::Red
+        } else if Self::hue_is_blue(hue) {
+            DetectedColour::Blue
+        } else {
+            DetectedColour::Unknown
+        };
+        self.update_colour_sort(detected_colour, now);
+
+        if self.block_counter.update(prox) && self.block_counter.block_count <= 7 {
+            if let Some(until) = self.indexer_run_until {
+                if until < now + Duration::from_millis(200) {
+                    self.indexer_run_until = Some(now + Duration::from_millis(200));
+                }
+            } else {
+                let delay = self.block_counter.activation_delay;
+                let target = now + delay;
+                self.indexer_pending_activation_until =
+                    Some(match self.indexer_pending_activation_until {
+                        Some(existing) if existing > target => existing,
+                        _ => target,
+                    });
+            }
+        }
+
+        if let Some(pending_until) = self.indexer_pending_activation_until
+            && now >= pending_until
+        {
+            self.indexer_run_until = Some(now + Duration::from_millis(200));
+            self.indexer_pending_activation_until = None;
         }
         let run_upper = match self.indexer_run_until {
             Some(until) if now < until => true,

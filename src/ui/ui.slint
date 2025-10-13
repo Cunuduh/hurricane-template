@@ -16,6 +16,10 @@ export component VexSelector inherits Window {
     in-out property <float> pose_x: 0.0;
     in-out property <float> pose_y: 0.0;
     in-out property <float> heading: 0.0;
+    in-out property <float> mcl_x: 0.0;
+    in-out property <float> mcl_y: 0.0;
+    in-out property <float> odom_x: 0.0;
+    in-out property <float> odom_y: 0.0;
     in-out property <float> battery_percentage: 85.0;
     in-out property <float> battery_voltage: 12.8; // nominal voltage
 
@@ -194,7 +198,7 @@ export component VexSelector inherits Window {
                             alignment: start;
                             
                             Text {
-                                text: "POSE";
+                                text: "POSE (MCL)";
                                 color: #94a3b8;
                                 font-size: 11px;
                                 font-weight: 600;
@@ -222,6 +226,18 @@ export component VexSelector inherits Window {
                                     font-size: 11px;
                                     font-family: "JetBrains Mono";
                                 }
+                            }
+                            Text {
+                                text: "MCL (x,y):  " + Math.round(mcl_x * 100) / 100 + ", " + Math.round(mcl_y * 100) / 100;
+                                color: #cbd5e1;
+                                font-size: 10px;
+                                font-family: "JetBrains Mono";
+                            }
+                            Text {
+                                text: "ODOM (x,y): " + Math.round(odom_x * 100) / 100 + ", " + Math.round(odom_y * 100) / 100;
+                                color: #cbd5e1;
+                                font-size: 10px;
+                                font-family: "JetBrains Mono";
                             }
                         }
                         VerticalBox {

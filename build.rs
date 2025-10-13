@@ -1,4 +1,8 @@
-use std::{env, fs, io::Write, path::{Path, PathBuf}};
+use std::{
+    env, fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct IRPose {
@@ -14,6 +18,7 @@ struct IRPoseSettings {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum IRAction {
     DriveCurve(Vec<(IRPose, IRPoseSettings)>),
+    DriveBoomerang(Vec<(IRPose, IRPoseSettings)>),
     DrivePtp(Vec<(IRPose, IRPoseSettings)>),
     DriveToPoint(IRPose, IRPoseSettings),
     DriveStraight(f64, IRPoseSettings),
@@ -22,6 +27,9 @@ enum IRAction {
     TriggerOnIndex(usize, String),
     TriggerOnDistance(f64, String),
     TriggerOnAngle(f64, String),
+    TriggerNow(String),
+    SetPose(IRPose),
+    Wait(u64),
 }
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct IRRoutine {
@@ -86,6 +94,8 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
 
     while let Some(line) = lines.next() {
         if line.starts_with("drive_curve") {
+            // drive_curve
+            //   point (x,y[,heading]) [attrs]
             let mut points: Vec<(IRPose, IRPoseSettings)> = Vec::new();
             while let Some(peek) = lines.peek() {
                 if !peek.starts_with("point") {
@@ -103,7 +113,46 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
                 points.push((pose, s));
             }
             actions.push(IRAction::DriveCurve(points));
+        } else if line.starts_with("drive_boomerang") {
+            // drive_boomerang
+            //   point (x,y,heading) [attrs]
+            // only accepts max 2 points, extras are ignored
+            let mut points: Vec<(IRPose, IRPoseSettings)> = Vec::new();
+            while let Some(peek) = lines.peek() {
+                if !peek.starts_with("point") {
+                    break;
+                }
+                let l = lines.next().unwrap();
+                let after = l.trim_start_matches("point").trim();
+                let lp = after.find('(').expect("point (");
+                let rp = after.find(')').expect(")");
+                let tuple_str = &after[lp..=rp];
+                let (x, y, h) = parse_tuple(tuple_str);
+                let rest = &after[rp + 1..];
+                let s = parse_attrs(rest);
+                let heading = h.expect("drive_boomerang requires heading for all points");
+                let pose = IRPose {
+                    x,
+                    y,
+                    heading: Some(heading),
+                };
+                points.push((pose, s));
+                if points.len() >= 2 {
+                    while let Some(peek) = lines.peek() {
+                        // eat the rest of the points
+                        if peek.starts_with("point") {
+                            lines.next();
+                        } else {
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
+            actions.push(IRAction::DriveBoomerang(points));
         } else if line.starts_with("drive_ptp") {
+            // drive_ptp
+            //   point (x,y[,heading]) [attrs]
             let mut points: Vec<(IRPose, IRPoseSettings)> = Vec::new();
             while let Some(peek) = lines.peek() {
                 if !peek.starts_with("point") {
@@ -125,6 +174,7 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             || line.starts_with("drive_to(")
             || line.starts_with("drive_to\t")
         {
+            // drive_to (x,y[,heading]) [attrs]
             let after = line.trim_start_matches("drive_to").trim();
             let lp = after.find('(').expect("(");
             let rp = after.find(')').expect(")");
@@ -134,6 +184,7 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             let pose = IRPose { x, y, heading: h };
             actions.push(IRAction::DriveToPoint(pose, s));
         } else if line.starts_with("drive_straight") {
+            // drive_straight distance [attrs]
             let after = line.trim_start_matches("drive_straight").trim();
             let mut parts = after.splitn(2, ' ');
             let dist_str = parts.next().unwrap_or("");
@@ -144,6 +195,7 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             }
             actions.push(IRAction::DriveStraight(dist, s));
         } else if line.starts_with("turn_to_point") || line.starts_with("turn_to ") {
+            // turn_to_point (x,y[,heading]) [attrs]
             let after = line
                 .trim_start_matches("turn_to_point")
                 .trim()
@@ -157,12 +209,14 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             let pose = IRPose { x, y, heading: h };
             actions.push(IRAction::TurnToPoint(pose, s));
         } else if line.starts_with("turn_to_angle") {
+            // turn_to_angle angle [attrs]
             let after = line.trim_start_matches("turn_to_angle").trim();
             let mut parts = after.splitn(2, ' ');
             let ang = parse_number(parts.next().unwrap_or("0"));
             let s = parse_attrs(parts.next().unwrap_or(""));
             actions.push(IRAction::TurnToAngle(ang, s));
         } else if line.starts_with("trigger_on_distance") {
+            // trigger_on_distance distance "name"
             let after = line.trim_start_matches("trigger_on_distance").trim();
             let mut parts = after.splitn(2, ' ');
             let d = parse_number(parts.next().unwrap_or("0"));
@@ -170,6 +224,7 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             let name = name.trim_matches('"').to_string();
             actions.push(IRAction::TriggerOnDistance(d, name));
         } else if line.starts_with("trigger_on_index") {
+            // trigger_on_index index "name"
             let after = line.trim_start_matches("trigger_on_index").trim();
             let mut parts = after.splitn(2, ' ');
             let idx: usize = parts.next().unwrap_or("0").parse().expect("index");
@@ -177,12 +232,31 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             let name = name.trim_matches('"').to_string();
             actions.push(IRAction::TriggerOnIndex(idx, name));
         } else if line.starts_with("trigger_on_angle") {
+            // trigger_on_angle angle "name"
             let after = line.trim_start_matches("trigger_on_angle").trim();
             let mut parts = after.splitn(2, ' ');
             let a = parse_number(parts.next().unwrap_or("0"));
             let name = parts.next().unwrap_or("").trim();
             let name = name.trim_matches('"').to_string();
             actions.push(IRAction::TriggerOnAngle(a, name));
+        } else if line.starts_with("trigger_now") {
+            // trigger_now "name"
+            let after = line.trim_start_matches("trigger_now").trim();
+            let name = after.trim().trim_matches('"').to_string();
+            actions.push(IRAction::TriggerNow(name));
+        } else if line.starts_with("set_pose") {
+            // set_pose (x,y[,heading])
+            let after = line.trim_start_matches("set_pose").trim();
+            let lp = after.find('(').expect("set_pose (");
+            let rp = after.find(')').expect(")");
+            let (x, y, h) = parse_tuple(&after[lp..=rp]);
+            let pose = IRPose { x, y, heading: h };
+            actions.push(IRAction::SetPose(pose));
+        } else if line.starts_with("wait ") {
+            // wait milliseconds
+            let after = line.trim_start_matches("wait").trim();
+            let ms: u64 = after.parse().expect("milliseconds");
+            actions.push(IRAction::Wait(ms));
         } else {
             // unknown line types are ignored
         }

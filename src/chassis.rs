@@ -1,7 +1,6 @@
 use core::time::Duration;
 extern crate alloc;
 use slint::SharedString;
-use alloc::vec;
 use vexide::{
     devices::{
         battery,
@@ -14,10 +13,13 @@ use vexide::{
 
 use crate::{
     VexSelector,
+    mcl::{Beam, Mcl},
     odometry::{Odometry, Pose, TrackingWheelConfig},
     pid::Pid,
-    triggers::TriggerManager,
+    triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition, TriggerManager},
 };
+
+const USE_MCL_LOCALIZATION: bool = true;
 
 #[derive(Copy, Clone, Debug)]
 pub struct PoseSettings {
@@ -39,9 +41,9 @@ pub struct ChassisConfig {
     pub track_width: f64,
     pub max_volts: f64,
     pub dt: Duration,
-    pub drive_pid: Pid,
     pub turn_pid: Pid,
     pub heading_pid: Pid,
+    pub drive_pid: Pid,
 
     pub small_drive_exit_error: f64,
     pub small_drive_settle_time: Duration,
@@ -70,6 +72,13 @@ pub enum IntakeMode {
     OuttakeMiddle,
     Reverse,
 }
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DetectedColour {
+    Red,
+    Blue,
+    Unknown,
+}
 pub struct BlockCounter {
     pub block_count: usize,
     detect_threshold: f64,
@@ -77,6 +86,7 @@ pub struct BlockCounter {
     block_detected: bool,
     last_count_time: Instant,
     min_time_between_blocks: Duration,
+    pub activation_delay: Duration,
 }
 impl BlockCounter {
     pub fn new() -> Self {
@@ -87,6 +97,7 @@ impl BlockCounter {
             block_detected: false,
             last_count_time: Instant::now(),
             min_time_between_blocks: Duration::from_millis(40),
+            activation_delay: Duration::from_millis(250),
         }
     }
     pub fn update(&mut self, proximity: f64) -> bool {
@@ -130,11 +141,25 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub outtake_middle_initial_reverse_until: Option<Instant>,
     pub scraper: AdiDigitalOut,
     pub hood: AdiDigitalOut,
+    pub wings: AdiDigitalOut,
+    pub block_park: AdiDigitalOut,
     pub colour_sort: AdiDigitalOut,
+    pub colour_sort_enabled: bool,
+    pub last_detected_colour: DetectedColour,
+    pub colour_sort_activation_time: Option<Instant>,
+    pub colour_sort_run_until: Option<Instant>,
     pub optical_sensor: OpticalSensor,
+    pub dist_front: DistanceSensor,
+    pub dist_right: DistanceSensor,
+    pub dist_back: DistanceSensor,
+    pub dist_left: DistanceSensor,
     pub indexer_run_until: Option<Instant>,
+    pub indexer_pending_activation_until: Option<Instant>,
     pub ui: slint::Weak<VexSelector>,
     pub last_diagnostics_update: Instant,
+    pub mcl: Mcl,
+    pub last_mcl_pose: Pose,
+    pub team_is_red: bool,
 }
 pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
@@ -144,12 +169,18 @@ pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub intake_motors: [Motor; I],
     pub imu: InertialSensor,
     pub optical_sensor: OpticalSensor,
+    pub dist_front: DistanceSensor,
+    pub dist_right: DistanceSensor,
+    pub dist_back: DistanceSensor,
+    pub dist_left: DistanceSensor,
     pub scraper: AdiDigitalOut,
     pub hood: AdiDigitalOut,
+    pub wings: AdiDigitalOut,
+    pub block_park: AdiDigitalOut,
     pub colour_sort: AdiDigitalOut,
     pub controller: Controller,
     pub config: ChassisConfig,
-    pub triggers: &'static [(&'static str, fn())],
+    pub triggers: &'static [TriggerDefinition],
     pub ui: slint::Weak<VexSelector>,
 }
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
@@ -165,7 +196,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let ui_anim = ui.clone();
             vexide::task::spawn(async move {
                 let start = Instant::now();
-                let total_ms = 4000.0_f64;
+                let total_ms = 3000.0_f64;
                 loop {
                     sleep(Duration::from_millis(50)).await;
                     if let Some(h) = ui_anim.upgrade() {
@@ -212,7 +243,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let _ = args.imu.reset_rotation();
         let _ = args
             .imu
-            .set_rotation(args.config.initial_pose.heading.to_degrees());
+            .set_rotation(-args.config.initial_pose.heading.to_degrees());
 
         for m in args.left_motors.iter_mut() {
             let _ = m.reset_position();
@@ -225,7 +256,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
         let _ = args.parallel_wheel.reset_position();
         let _ = args.perpendicular_wheel.reset_position();
-        let odometry = Odometry::new(args.config.initial_pose, args.config.tw_config);
+        let initial_pose = args.config.initial_pose;
+        let odometry = Odometry::new(initial_pose, args.config.tw_config);
+        let mcl = Mcl::new(initial_pose);
         let motor_free_rpm = match args.left_motors[0].gearset() {
             Ok(Gearset::Blue) => 600.0,
             Ok(Gearset::Green) => 200.0,
@@ -233,12 +266,16 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             Err(_) => 600.0,
         };
         let _ = args.scraper.set_low();
-        let _ = args.hood.set_low();
+        let _ = args.hood.set_high();
         let _ = args.colour_sort.set_low();
+        let _ = args.wings.set_low();
+        let _ = args.block_park.set_low();
         let _ = args.optical_sensor.set_led_brightness(1.0);
         let _ = args
             .optical_sensor
             .set_integration_time(Duration::from_millis(40));
+        let initial_team_is_red = ui.upgrade().is_none_or(|h| h.get_is_red_alliance());
+        let _ = args.controller.screen.clear_screen().await;
         Self {
             left_motors: args.left_motors,
             right_motors: args.right_motors,
@@ -264,21 +301,240 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             outtake_middle_initial_reverse_until: None,
             scraper: args.scraper,
             hood: args.hood,
+            wings: args.wings,
+            block_park: args.block_park,
             colour_sort: args.colour_sort,
+            colour_sort_enabled: false,
+            last_detected_colour: DetectedColour::Unknown,
+            colour_sort_activation_time: None,
+            colour_sort_run_until: None,
             optical_sensor: args.optical_sensor,
+            dist_front: args.dist_front,
+            dist_right: args.dist_right,
+            dist_back: args.dist_back,
+            dist_left: args.dist_left,
             indexer_run_until: None,
+            indexer_pending_activation_until: None,
             ui,
             last_diagnostics_update: Instant::now(),
+            mcl,
+            last_mcl_pose: initial_pose,
+            // read initial value from UI if present, default to red
+            team_is_red: initial_team_is_red,
         }
     }
 
     pub fn update_state(&mut self) {
         let parallel_pos = self.parallel_wheel.position().unwrap_or_default();
         let perpendicular_pos = self.perpendicular_wheel.position().unwrap_or_default();
-        let imu_heading_rad = self.imu.rotation().unwrap_or_default().to_radians();
+        let imu_heading_rad = -self.imu.rotation().unwrap_or_default().to_radians();
+
+        let prev_pose = self.odometry.pose();
         self.odometry
             .update(parallel_pos, perpendicular_pos, imu_heading_rad);
+        let curr_pose = self.odometry.pose();
+        let dx = curr_pose.x - prev_pose.x;
+        let dy = curr_pose.y - prev_pose.y;
+
+        if !USE_MCL_LOCALIZATION {
+            self.last_mcl_pose = curr_pose;
+            self.update_diagnostics();
+            return;
+        }
+
+        let mut beams: alloc::vec::Vec<Beam> = alloc::vec::Vec::with_capacity(4);
+        if let Ok(o) = self.dist_front.object()
+            && let Some(obj) = o
+        {
+            let inches = (obj.distance as f64) / 25.4;
+            beams.push(Beam {
+                angle: 0.0,
+                distance: inches as f32,
+                offset_x: 3.25,
+                offset_y: 5.25,
+            });
+        }
+        if let Ok(o) = self.dist_right.object()
+            && let Some(obj) = o
+        {
+            let inches = (obj.distance as f64) / 25.4;
+            beams.push(Beam {
+                angle: -core::f32::consts::FRAC_PI_2,
+                distance: inches as f32,
+                offset_x: 5.5,
+                offset_y: 1.625,
+            });
+        }
+        if let Ok(o) = self.dist_back.object()
+            && let Some(obj) = o
+        {
+            let inches = (obj.distance as f64) / 25.4;
+            beams.push(Beam {
+                angle: core::f32::consts::PI,
+                distance: inches as f32,
+                offset_x: -5.0,
+                offset_y: -1.25,
+            });
+        }
+        if let Ok(o) = self.dist_left.object()
+            && let Some(obj) = o
+        {
+            let inches = (obj.distance as f64) / 25.4;
+            beams.push(Beam {
+                angle: core::f32::consts::FRAC_PI_2,
+                distance: inches as f32,
+                offset_x: -5.5,
+                offset_y: 1.625,
+            });
+        }
+
+        let est = self.mcl.run(&beams, (dx, dy), imu_heading_rad);
+        self.last_mcl_pose = est;
         self.update_diagnostics();
+    }
+
+    #[inline]
+    pub fn mcl_pose(&self) -> Pose {
+        self.last_mcl_pose
+    }
+
+    pub fn apply_trigger_actions(&mut self, actions: &[TriggerAction]) {
+        for &action in actions {
+            self.apply_trigger_action(action);
+        }
+        self.service_autonomous_intake();
+    }
+
+    fn apply_trigger_action(&mut self, action: TriggerAction) {
+        match action {
+            TriggerAction::Intake(command) => {
+                self.indexer_run_until = None;
+                self.indexer_pending_activation_until = None;
+                match command {
+                    IntakeCommand::Intake => {
+                        self.intake_mode = IntakeMode::Intake;
+                        self.outtake_initial_reverse_until = None;
+                        self.outtake_jam_reverse_until = None;
+                        self.outtake_middle_initial_reverse_until = None;
+                        self.outtake_middle_jam_reverse_until = None;
+                    }
+                    IntakeCommand::Outtake => {
+                        self.intake_mode = IntakeMode::Outtake;
+                        self.block_counter.block_count = 0;
+                        let now = Instant::now();
+                        self.outtake_initial_reverse_until = Some(now + Duration::from_millis(100));
+                        self.outtake_jam_reverse_until = None;
+                        self.outtake_middle_initial_reverse_until = None;
+                        self.outtake_middle_jam_reverse_until = None;
+                    }
+                    IntakeCommand::OuttakeMiddle => {
+                        self.intake_mode = IntakeMode::OuttakeMiddle;
+                        self.block_counter.block_count = 0;
+                        let now = Instant::now();
+                        self.outtake_middle_initial_reverse_until =
+                            Some(now + Duration::from_millis(100));
+                        self.outtake_middle_jam_reverse_until = None;
+                        self.outtake_initial_reverse_until = None;
+                        self.outtake_jam_reverse_until = None;
+                    }
+                    IntakeCommand::Reverse => {
+                        self.intake_mode = IntakeMode::Reverse;
+                        self.outtake_initial_reverse_until = None;
+                        self.outtake_jam_reverse_until = None;
+                        self.outtake_middle_initial_reverse_until = None;
+                        self.outtake_middle_jam_reverse_until = None;
+                    }
+                    IntakeCommand::Stop => {
+                        self.intake_mode = IntakeMode::Idle;
+                        self.outtake_initial_reverse_until = None;
+                        self.outtake_jam_reverse_until = None;
+                        self.outtake_middle_initial_reverse_until = None;
+                        self.outtake_middle_jam_reverse_until = None;
+                        for m in self.intake_motors.iter_mut() {
+                            let _ = m.set_voltage(0.0);
+                        }
+                    }
+                }
+            }
+            TriggerAction::SetPneumatic { target, state } => {
+                self.set_pneumatic_state(target, state);
+            }
+            TriggerAction::TogglePneumatic(target) => {
+                self.toggle_pneumatic(target);
+            }
+            TriggerAction::SetColourSortEnabled(enabled) => {
+                self.colour_sort_enabled = enabled;
+                if !enabled {
+                    self.colour_sort_activation_time = None;
+                    self.colour_sort_run_until = None;
+                    let _ = self.colour_sort.set_low();
+                }
+            }
+        }
+    }
+
+    fn set_pneumatic_state(&mut self, target: PneumaticTarget, state: bool) {
+        match target {
+            PneumaticTarget::Scraper => {
+                if state {
+                    let _ = self.scraper.set_high();
+                } else {
+                    let _ = self.scraper.set_low();
+                }
+            }
+            PneumaticTarget::Hood => {
+                if state {
+                    let _ = self.hood.set_high();
+                } else {
+                    let _ = self.hood.set_low();
+                }
+            }
+            PneumaticTarget::Wings => {
+                if state {
+                    let _ = self.wings.set_high();
+                } else {
+                    let _ = self.wings.set_low();
+                }
+            }
+            PneumaticTarget::BlockPark => {
+                if state {
+                    let _ = self.block_park.set_high();
+                } else {
+                    let _ = self.block_park.set_low();
+                }
+            }
+            PneumaticTarget::ColourSort => {
+                self.colour_sort_activation_time = None;
+                self.colour_sort_run_until = None;
+                if state {
+                    let _ = self.colour_sort.set_high();
+                } else {
+                    let _ = self.colour_sort.set_low();
+                }
+            }
+        }
+    }
+
+    fn toggle_pneumatic(&mut self, target: PneumaticTarget) {
+        match target {
+            PneumaticTarget::Scraper => {
+                let _ = self.scraper.toggle();
+            }
+            PneumaticTarget::Hood => {
+                let _ = self.hood.toggle();
+            }
+            PneumaticTarget::Wings => {
+                let _ = self.wings.toggle();
+            }
+            PneumaticTarget::BlockPark => {
+                let _ = self.block_park.toggle();
+            }
+            PneumaticTarget::ColourSort => {
+                self.colour_sort_activation_time = None;
+                self.colour_sort_run_until = None;
+                let _ = self.colour_sort.toggle();
+            }
+        }
     }
 
     pub fn check_stall(&mut self) -> bool {
@@ -328,10 +584,17 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.last_diagnostics_update = now;
 
         if let Some(handle) = self.ui.upgrade() {
-            let p = self.odometry.pose();
-            handle.set_pose_x(p.x as f32);
-            handle.set_pose_y(p.y as f32);
-            let heading_deg = self.imu.heading().unwrap_or_default() as f32;
+            let ui_is_red = handle.get_is_red_alliance();
+            self.team_is_red = ui_is_red;
+            let mcl = self.last_mcl_pose;
+            let odom = self.odometry.pose();
+            handle.set_pose_x(mcl.x as f32);
+            handle.set_pose_y(mcl.y as f32);
+            handle.set_mcl_x(mcl.x as f32);
+            handle.set_mcl_y(mcl.y as f32);
+            handle.set_odom_x(odom.x as f32);
+            handle.set_odom_y(odom.y as f32);
+            let heading_deg = -self.imu.heading().unwrap_or_default() as f32;
             handle.set_heading(heading_deg);
 
             let lm1 = self.left_motors[0].temperature().unwrap_or_default() as f32;
@@ -359,5 +622,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             handle.set_battery_voltage(battery_voltage);
             handle.set_battery_percentage(battery_percentage);
         }
+
+    }
+
+    pub fn set_pose(&mut self, pose: Pose) {
+        self.odometry.reset(pose);
+        self.mcl = Mcl::new(pose);
+        self.last_mcl_pose = pose;
+        let _ = self.imu.set_rotation(-pose.heading.to_degrees());
+        self.update_diagnostics();
     }
 }

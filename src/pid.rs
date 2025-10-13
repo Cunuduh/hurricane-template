@@ -37,22 +37,19 @@ impl Pid {
             return self.kp * error + self.ki * self.integral;
         }
 
-        if let Some(prev_e) = self.prev_error
-            && prev_e * error < 0.0 {
-                self.integral = 0.0;
-            }
-
         self.integral *= self.integral_decay;
         self.integral += error * dt;
         if self.integral_limit > 0.0 {
-            self.integral = self.integral.clamp(-self.integral_limit, self.integral_limit);
+            self.integral = self
+                .integral
+                .clamp(-self.integral_limit, self.integral_limit);
         }
 
         let derivative = match self.prev_error {
             Some(prev) => (error - prev) / dt,
             None => 0.0,
         };
-        
+
         self.prev_error = Some(error);
         (self.kp * error) + (self.ki * self.integral) + (self.kd * derivative)
     }
