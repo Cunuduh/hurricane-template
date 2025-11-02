@@ -31,6 +31,7 @@ enum IRAction {
     TriggerNow(String),
     SetPose(IRPose),
     Wait(u64),
+    DriveFor(u64, f64, bool),
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct IRRoutine {
@@ -41,10 +42,11 @@ struct IRRoutine {
 include!(concat!(env!("OUT_DIR"), "/routines_index.rs"));
 
 fn mirror_pose(pose: Pose) -> Pose {
+    // rotate 180 degrees about the origin to map red to blue side
     Pose {
         x: -pose.x,
-        y: pose.y,
-        heading: core::f64::consts::PI - pose.heading,
+        y: -pose.y,
+        heading: pose.heading + core::f64::consts::PI,
     }
 }
 
@@ -95,11 +97,7 @@ fn map_action(a: IRAction, is_red: bool) -> Action {
         IRAction::DriveStraight(d, s) => Action::DriveStraight(d, map_settings(s)),
         IRAction::TurnToPoint(p, s) => Action::TurnToPoint(map_pose(p, is_red), map_settings(s)),
         IRAction::TurnToAngle(a, s) => {
-            let angle = if is_red {
-                a
-            } else {
-                180.0 - a
-            };
+            let angle = if is_red { a } else { a + 180.0 };
             Action::TurnToAngle(angle, map_settings(s))
         }
         IRAction::TriggerOnIndex(i, n) => Action::TriggerOnIndex(i, n),
@@ -108,6 +106,7 @@ fn map_action(a: IRAction, is_red: bool) -> Action {
         IRAction::TriggerNow(n) => Action::TriggerNow(n),
         IRAction::SetPose(p) => Action::SetPose(map_pose(p, is_red)),
         IRAction::Wait(ms) => Action::Wait(ms),
+        IRAction::DriveFor(ms, v, r) => Action::DriveFor(ms, v, r),
     }
 }
 

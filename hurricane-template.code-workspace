@@ -19,6 +19,7 @@
 			"unused_variables",
 			"unused_imports",
 			"too_many_arguments"
-		]
+		],
+		"rust-analyzer.checkOnSave": false
 	}
 }

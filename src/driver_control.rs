@@ -94,6 +94,79 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     pub fn toggle_block_park(&mut self) {
         let _ = self.block_park.toggle();
     }
+    pub fn block_park_macro_is_active(&self) -> bool {
+        self.block_park_macro_active
+    }
+    pub fn start_block_park_macro(&mut self) {
+        self.block_park_macro_active = true;
+        self.block_park_macro_detected = false;
+        self.block_park_macro_post_delay_until = None;
+        let prox = self.optical_sensor.proximity().unwrap_or_default();
+        self.block_park_macro_last_prox_high = prox > 0.35;
+        let _ = self.block_park.set_low();
+        self.intake_mode = IntakeMode::Idle;
+        self.outtake_initial_reverse_until = None;
+        self.outtake_jam_reverse_until = None;
+        self.outtake_middle_initial_reverse_until = None;
+        self.outtake_middle_jam_reverse_until = None;
+    }
+    pub fn cancel_block_park_macro(&mut self) {
+        self.block_park_macro_active = false;
+        self.block_park_macro_detected = false;
+        self.block_park_macro_post_delay_until = None;
+        self.block_park_macro_last_prox_high = false;
+        for m in self.intake_motors.iter_mut() {
+            let _ = m.set_voltage(0.0);
+        }
+        let _ = self.block_park.set_low();
+    }
+    pub fn service_block_park_macro(&mut self) {
+        if !self.block_park_macro_active {
+            return;
+        }
+
+        let now = Instant::now();
+        let prox = self.optical_sensor.proximity().unwrap_or_default();
+
+        if !self.block_park_macro_detected {
+            // hysteresis around thresholds similar to block counter
+            let detect_threshold = 0.35;
+            let release_threshold = 0.15;
+            let was_high = self.block_park_macro_last_prox_high;
+            let is_high = if was_high {
+                prox > release_threshold
+            } else {
+                prox > detect_threshold
+            };
+            if is_high && !was_high {
+                self.block_park_macro_detected = true;
+                self.block_park_macro_post_delay_until = Some(now + Duration::from_millis(214));
+            }
+            self.block_park_macro_last_prox_high = is_high;
+        }
+
+        // keep reversing until post-delay elapses after first detection
+        if !self.block_park_macro_detected
+            || self
+                .block_park_macro_post_delay_until
+                .is_some_and(|until| now < until)
+        {
+            for m in self.intake_motors.iter_mut() {
+                let _ = m.set_voltage(-9.0);
+            }
+            return;
+        }
+
+        // done: stop intake and activate block park
+        for m in self.intake_motors.iter_mut() {
+            let _ = m.set_voltage(0.0);
+        }
+        let _ = self.block_park.set_high();
+        self.block_park_macro_active = false;
+        self.block_park_macro_detected = false;
+        self.block_park_macro_post_delay_until = None;
+        self.block_park_macro_last_prox_high = false;
+    }
     pub fn toggle_colour_sort(&mut self) {
         self.colour_sort_enabled = !self.colour_sort_enabled;
         if !self.colour_sort_enabled {
@@ -112,6 +185,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         (180.0..300.0).contains(&h)
     }
     fn set_colour_sort_state(&mut self, high: bool) {
+        if self.alt_colour_sort_enabled {
+            let _ = self.colour_sort.set_low();
+            return;
+        }
         if high {
             let _ = self.colour_sort.set_high();
         } else {
@@ -136,7 +213,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         if enemy_detected {
             const ACTIVATION_DELAY_MS: u64 = 75;
-            const PULSE_DURATION_MS: u64 = 150;
+            const PULSE_DURATION_MS: u64 = 25;
             let activation_delay = Duration::from_millis(ACTIVATION_DELAY_MS);
             let pulse_duration = Duration::from_millis(PULSE_DURATION_MS);
 
@@ -184,6 +261,23 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         } else if !enemy_detected {
             self.set_colour_sort_state(false);
         }
+    }
+
+    #[inline]
+    fn alt_colour_sort_active(&self, now: Instant) -> bool {
+        if !self.alt_colour_sort_enabled {
+            return false;
+        }
+        if let Some(until) = self.colour_sort_run_until {
+            if now >= until {
+                return false;
+            }
+            if let Some(activation) = self.colour_sort_activation_time {
+                return now >= activation;
+            }
+            return true;
+        }
+        false
     }
     pub fn toggle_hood(&mut self) {
         let _ = self.hood.toggle();
@@ -323,8 +417,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         if dir != 0.0 {
             self.block_counter.block_count = 0;
             for (i, m) in self.intake_motors.iter_mut().enumerate() {
-                let applied = if i == 2 { -dir } else { dir };
-                let _ = m.set_voltage(12.0 * applied);
+                let applied = if i == 2 { -8.0 } else { 8.0 };
+                let _ = m.set_voltage(applied);
             }
             if dir > 0.0 {
                 let _ = self.hood.set_high();
@@ -348,12 +442,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
     fn apply_reverse(&mut self) -> bool {
         for m in self.intake_motors.iter_mut() {
-            let _ = m.set_voltage(-12.0);
+            let _ = m.set_voltage(-10.0);
         }
         true
     }
 
     fn apply_intake(&mut self) -> bool {
+        let _ = self.optical_sensor.set_led_brightness(1.0);
         let prox = self.optical_sensor.proximity().unwrap_or_default();
         let hue = self.optical_sensor.hue().unwrap_or_default();
         let now = Instant::now();
@@ -365,7 +460,43 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         } else {
             DetectedColour::Unknown
         };
-        self.update_colour_sort(detected_colour, now);
+        if self.alt_colour_sort_enabled {
+            let enemy_detected = match detected_colour {
+                DetectedColour::Red => !self.team_is_red,
+                DetectedColour::Blue => self.team_is_red,
+                DetectedColour::Unknown => false,
+            };
+            const ALT_REVERSE_MS: u64 = 100;
+            let pulse = Duration::from_millis(ALT_REVERSE_MS);
+            if enemy_detected {
+                if !self.alt_colour_last_enemy {
+                    match self.alt_colour_sort_run_until {
+                        Some(curr) if now < curr => {
+                            self.alt_colour_sort_run_until = Some(curr + pulse);
+                        }
+                        _ => {
+                            self.alt_colour_sort_run_until = Some(now + pulse);
+                        }
+                    }
+                    self.alt_colour_last_enemy = true;
+                }
+            } else {
+                self.alt_colour_last_enemy = false;
+            }
+            if let Some(until) = self.alt_colour_sort_run_until {
+                if now < until {
+                    if let Some(front) = self.intake_motors.first_mut() {
+                        let _ = front.set_voltage(-9.0);
+                    }
+                    let _ = self.colour_sort.set_low();
+                    return true;
+                } else {
+                    self.alt_colour_sort_run_until = None;
+                }
+            }
+        } else {
+            self.update_colour_sort(detected_colour, now);
+        }
 
         if self.block_counter.update(prox) && self.block_counter.block_count <= 7 {
             if let Some(until) = self.indexer_run_until {

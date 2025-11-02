@@ -4,7 +4,6 @@ pub struct Pid {
     pub ki: f64,
     pub kd: f64,
     pub integral_limit: f64,
-    pub min_error: f64,
     pub integral_decay: f64,
     prev_error: Option<f64>,
     integral: f64,
@@ -12,14 +11,13 @@ pub struct Pid {
 }
 
 impl Pid {
-    pub fn new(kp: f64, ki: f64, kd: f64, integral_limit: f64, min_error: f64) -> Self {
+    pub fn new(kp: f64, ki: f64, kd: f64, integral_limit: f64) -> Self {
         Self {
             kp,
             ki,
             kd,
             integral_limit,
-            min_error,
-            integral_decay: 0.99,
+            integral_decay: 0.995,
             prev_error: None,
             integral: 0.0,
             disabled: false,
@@ -27,14 +25,9 @@ impl Pid {
     }
 
     pub fn next(&mut self, error: f64, dt: f64) -> f64 {
-        if self.disabled || error.abs() < self.min_error {
+        if self.disabled {
             self.reset();
             return 0.0;
-        }
-
-        if dt == 0.0 {
-            self.prev_error = Some(error);
-            return self.kp * error + self.ki * self.integral;
         }
 
         self.integral *= self.integral_decay;

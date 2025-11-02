@@ -21,6 +21,7 @@ static UI_SELECTED_ROUTE: AtomicUsize = AtomicUsize::new(0);
 static IS_RED_ALLIANCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
 use vexide::fs;
 const AUTON_SAVE_PATH: &str = "auton.txt";
+const ALLIANCE_SAVE_PATH: &str = "alliance.txt";
 use alloc::string::ToString;
 
 mod autonomous;
@@ -157,6 +158,14 @@ const AUTON_TRIGGER_DEFINITIONS: &[TriggerDefinition] = &[
         name: "colour_sort_disable",
         actions: &[TriggerAction::SetColourSortEnabled(false)],
     },
+    TriggerDefinition {
+        name: "alt_colour_sort_enable",
+        actions: &[TriggerAction::SetAltColourSortEnabled(true)],
+    },
+    TriggerDefinition {
+        name: "alt_colour_sort_disable",
+        actions: &[TriggerAction::SetAltColourSortEnabled(false)],
+    },
 ];
 
 #[vexide::main]
@@ -173,13 +182,31 @@ async fn main(peripherals: Peripherals) {
             let _ = fs::write(AUTON_SAVE_PATH, i.to_string().as_bytes());
         }
     });
+    // load saved alliance from sd
+    if let Ok(saved) = fs::read_to_string(ALLIANCE_SAVE_PATH) {
+        let s = saved.trim().to_ascii_lowercase();
+        let is_red = matches!(
+            &s[..],
+            "red" | "r" | "1" | "true" | "t" | "yes" | "y"
+        );
+        ui.set_is_red_alliance(is_red);
+        IS_RED_ALLIANCE.store(is_red, Ordering::Relaxed);
+    }
     
     let ui_clone = ui.as_weak();
     vexide::task::spawn(async move {
+        let mut last_is_red: Option<bool> = None;
         loop {
             if let Some(ui_handle) = ui_clone.upgrade() {
                 let is_red = ui_handle.get_is_red_alliance();
                 IS_RED_ALLIANCE.store(is_red, Ordering::Relaxed);
+                if last_is_red != Some(is_red) {
+                    let _ = fs::write(
+                        ALLIANCE_SAVE_PATH,
+                        if is_red { b"red" as &[u8] } else { b"blue" as &[u8] },
+                    );
+                    last_is_red = Some(is_red);
+                }
             }
             sleep(Duration::from_millis(100)).await;
         }
@@ -311,14 +338,14 @@ impl Robot {
         let dist_right =
             DistanceSensor::new(peripherals.take_smart_port(17).expect("smart port 17"));
         let tw_config = TrackingWheelConfig {
-            parallel_offset: 0.302,
-            perpendicular_offset: -0.021,
+            parallel_offset: -0.020,
+            perpendicular_offset: -0.035,
             wheel_diameter: 2.0,
         };
 
-        let drive_pid = Pid::new(6.0, 0.0, 0.5, 0.0, 0.0);
-        let turn_pid = Pid::new(9.0, 0.0, 0.05, 0.0, 2.0_f64.to_radians());
-        let heading_pid = Pid::new(3.0, 0.0, 0.0, 0.0, 0.0);
+        let drive_pid = Pid::new(3.5, 0.0, 0.25, 0.0);
+        let turn_pid = Pid::new(50.0, 0.0, 3.5, 0.0);
+        let heading_pid = Pid::new(15.0, 0.0, 0.0, 0.0);
 
         let config = ChassisConfig {
             initial_pose: Pose {
@@ -327,28 +354,28 @@ impl Robot {
                 heading: 0.0,
             },
             wheel_diameter: 3.25,
-            ext_gear_ratio: 1.5,
-            track_width: 18.0,
+            ext_gear_ratio: 48.0 / 36.0,
+            track_width: 15.0,
             max_volts: 12.0,
             dt: Duration::from_millis(10),
             turn_pid,
             heading_pid,
             drive_pid,
-            small_drive_exit_error: 1.0,
+            small_drive_exit_error: 0.1,
             small_drive_settle_time: Duration::from_millis(50),
-            big_drive_exit_error: 3.0,
-            big_drive_settle_time: Duration::from_millis(250),
+            big_drive_exit_error: 0.5,
+            big_drive_settle_time: Duration::from_millis(100),
 
-            small_turn_exit_error: 2.0,
+            small_turn_exit_error: 0.25,
             small_turn_settle_time: Duration::from_millis(50),
-            big_turn_exit_error: 5.0,
-            big_turn_settle_time: Duration::from_millis(250),
+            big_turn_exit_error: 1.0,
+            big_turn_settle_time: Duration::from_millis(100),
 
             stall_current_threshold: 2.4,
             stall_velocity_threshold: 1.0,
             stall_time: Duration::from_millis(400),
 
-            accel_t: 0.5,
+            accel_t: 0.25, // time to reach max velocity
             tw_config,
         };
         let chassis = Chassis::new(ChassisArgs {
@@ -393,11 +420,25 @@ impl Compete for Robot {
         }
         let target = if idx < routines.len() { idx } else { 0 };
         let plan = routines.into_iter().nth(target).map(|(_, p)| p).unwrap();
+        let _ = self.chassis.optical_sensor.set_led_brightness(1.0);
+        let _ = self.chassis.optical_sensor.set_integration_time(Duration::from_millis(40));
         self.run_plan(plan).await;
     }
 
     async fn driver(&mut self) {
+        for m in self.chassis.left_motors.iter_mut() {
+            let _ = m.set_voltage(0.0);
+        }
+        for m in self.chassis.right_motors.iter_mut() {
+            let _ = m.set_voltage(0.0);
+        }
+        for m in self.chassis.intake_motors.iter_mut() {
+            let _ = m.set_voltage(0.0);
+        }
+        let _ = self.chassis.optical_sensor.set_integration_time(Duration::from_millis(40));
+        let _ = self.chassis.optical_sensor.set_led_brightness(1.0);
         loop {
+            let _ = self.chassis.optical_sensor.set_led_brightness(1.0);
             let c_state = self.chassis.controller.state().unwrap_or_default();
             self.chassis.cheesy_control(&c_state);
             self.chassis.handle_intake_subsystem(
@@ -414,14 +455,23 @@ impl Compete for Robot {
                 self.chassis.toggle_wings();
             }
             if c_state.button_y.is_now_pressed() {
+                if self.chassis.block_park_macro_is_active() {
+                    self.chassis.cancel_block_park_macro();
+                } else {
+                    self.chassis.start_block_park_macro();
+                }
+            }
+            if c_state.button_up.is_now_pressed() {
                 self.chassis.toggle_block_park();
             }
             if c_state.button_l1.is_now_pressed() {
                 self.chassis.toggle_hood();
             }
-            // if c_state.button_b.is_pressed() {
-            //     self.chassis.calibrate_tracking_wheels().await;
-            // }
+            if c_state.button_x.is_now_pressed() {
+                self.chassis.toggle_colour_sort();
+            }
+            // run block park macro after intake subsystem so it can override motor outputs
+            self.chassis.service_block_park_macro();
             sleep(self.chassis.config.dt).await;
         }
     }

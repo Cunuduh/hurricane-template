@@ -30,6 +30,7 @@ enum IRAction {
     TriggerNow(String),
     SetPose(IRPose),
     Wait(u64),
+    DriveFor(u64, f64, bool),
 }
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 struct IRRoutine {
@@ -170,6 +171,18 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
                 points.push((pose, s));
             }
             actions.push(IRAction::DrivePtp(points));
+        } else if line.starts_with("drive_for") {
+            // drive_for <ms> [attrs]
+            let after = line.trim_start_matches("drive_for").trim();
+            let mut parts = after.splitn(2, ' ');
+            let ms: u64 = parts
+                .next()
+                .unwrap_or("0")
+                .parse()
+                .expect("milliseconds");
+            let attrs = parts.next().unwrap_or("");
+            let s = parse_attrs(attrs);
+            actions.push(IRAction::DriveFor(ms, s.max_voltage, s.is_reversed));
         } else if line.starts_with("drive_to ")
             || line.starts_with("drive_to(")
             || line.starts_with("drive_to\t")
@@ -189,10 +202,7 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
             let mut parts = after.splitn(2, ' ');
             let dist_str = parts.next().unwrap_or("");
             let s = parse_attrs(parts.next().unwrap_or(""));
-            let mut dist = parse_number(dist_str);
-            if s.is_reversed {
-                dist = -dist;
-            }
+            let dist = parse_number(dist_str);
             actions.push(IRAction::DriveStraight(dist, s));
         } else if line.starts_with("turn_to_point") || line.starts_with("turn_to ") {
             // turn_to_point (x,y[,heading]) [attrs]

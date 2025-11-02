@@ -19,7 +19,7 @@ use crate::{
     triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition, TriggerManager},
 };
 
-const USE_MCL_LOCALIZATION: bool = true;
+const USE_MCL_LOCALIZATION: bool = false;
 
 #[derive(Copy, Clone, Debug)]
 pub struct PoseSettings {
@@ -145,6 +145,9 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub block_park: AdiDigitalOut,
     pub colour_sort: AdiDigitalOut,
     pub colour_sort_enabled: bool,
+    pub alt_colour_sort_enabled: bool,
+    pub alt_colour_sort_run_until: Option<Instant>,
+    pub alt_colour_last_enemy: bool,
     pub last_detected_colour: DetectedColour,
     pub colour_sort_activation_time: Option<Instant>,
     pub colour_sort_run_until: Option<Instant>,
@@ -160,6 +163,11 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub mcl: Mcl,
     pub last_mcl_pose: Pose,
     pub team_is_red: bool,
+    // block park macro state
+    pub block_park_macro_active: bool,
+    pub block_park_macro_detected: bool,
+    pub block_park_macro_post_delay_until: Option<Instant>,
+    pub block_park_macro_last_prox_high: bool,
 }
 pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub left_motors: [Motor; L],
@@ -305,6 +313,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             block_park: args.block_park,
             colour_sort: args.colour_sort,
             colour_sort_enabled: false,
+            alt_colour_sort_enabled: false,
+            alt_colour_sort_run_until: None,
+            alt_colour_last_enemy: false,
             last_detected_colour: DetectedColour::Unknown,
             colour_sort_activation_time: None,
             colour_sort_run_until: None,
@@ -321,6 +332,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             last_mcl_pose: initial_pose,
             // read initial value from UI if present, default to red
             team_is_red: initial_team_is_red,
+            block_park_macro_active: false,
+            block_park_macro_detected: false,
+            block_park_macro_post_delay_until: None,
+            block_park_macro_last_prox_high: false,
         }
     }
 
@@ -470,6 +485,19 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     let _ = self.colour_sort.set_low();
                 }
             }
+            TriggerAction::SetAltColourSortEnabled(enabled) => {
+                self.alt_colour_sort_enabled = enabled;
+                // ensure solenoid is off when switching alt mode
+                if enabled {
+                    let _ = self.colour_sort.set_low();
+                    self.colour_sort_activation_time = None;
+                    self.colour_sort_run_until = None;
+                    self.alt_colour_last_enemy = false;
+                } else {
+                    self.alt_colour_sort_run_until = None;
+                    self.alt_colour_last_enemy = false;
+                }
+            }
         }
     }
 
@@ -543,7 +571,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut num_motors = 0;
 
         for motor in self.left_motors.iter().chain(self.right_motors.iter()) {
-            total_current += motor.current().unwrap_or_default();
+            total_current += motor.current().unwrap_or_default().abs();
             total_velocity += motor.velocity().unwrap_or_default().abs();
             num_motors += 1;
         }
@@ -622,7 +650,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             handle.set_battery_voltage(battery_voltage);
             handle.set_battery_percentage(battery_percentage);
         }
-
     }
 
     pub fn set_pose(&mut self, pose: Pose) {

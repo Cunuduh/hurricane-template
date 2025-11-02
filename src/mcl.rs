@@ -17,8 +17,10 @@ use crate::odometry::Pose;
 
 const N: usize = 256;
 const INV_N: f32 = (N as f32).recip();
-const GAUSSIAN_STDDEV: f32 = 2.0; // inches
+const GAUSSIAN_STDDEV: f32 = 3.5; // inches
 const GAUSSIAN_FACTOR: f32 = 1.0;
+const Z_HIT: f32 = 0.9;
+const Z_RAND: f32 = 0.1;
 const XY_NOISE: f32 = 0.1; // inches per update step
 const REINIT_SPREAD: f32 = 8.0;
 const UNIFORM_PARTICLE_RATIO: f32 = 0.2;
@@ -165,22 +167,26 @@ impl Particles {
         let st = theta.sin();
         let sx = x + beam.offset_x * ct - beam.offset_y * st;
         let sy = y + beam.offset_x * st + beam.offset_y * ct;
-        (
-            sx + beam.distance * global_theta.cos(),
-            sy + beam.distance * global_theta.sin(),
-            global_theta,
-        )
+        (sx, sy, global_theta)
     }
 
     fn distance_to_wall(point: (f32, f32, f32), field_half: f32) -> f32 {
         let (px, py, ang) = point;
-        let c = ang.cos().abs().max(1e-6_f32);
-        let s = ang.sin().abs().max(1e-6_f32);
-        let dx1 = ((px - field_half).abs()) / c;
-        let dx2 = ((px + field_half).abs()) / c;
-        let dy1 = ((py - field_half).abs()) / s;
-        let dy2 = ((py + field_half).abs()) / s;
-        dx1.min(dx2).min(dy1).min(dy2)
+        let c = ang.cos();
+        let s = ang.sin();
+
+        let mut t = f32::INFINITY;
+        if c > 1e-6 {
+            t = t.min((field_half - px) / c);
+        } else if c < -1e-6 {
+            t = t.min((-field_half - px) / c);
+        }
+        if s > 1e-6 {
+            t = t.min((field_half - py) / s);
+        } else if s < -1e-6 {
+            t = t.min((-field_half - py) / s);
+        }
+        if t.is_finite() { t.max(0.0) } else { 0.0 }
     }
 
     fn gaussian(x: f32, stddev: f32, factor: f32) -> f32 {
@@ -193,15 +199,39 @@ impl Particles {
     }
 
     fn update_weight(&mut self, beams: &[Beam], field_half: f32, stddev: f32, factor: f32) {
-        for i in 0..self.len() {
-            let mut acc = 0.0_f32;
-            for b in beams {
-                let expected = self.expected_point(i, b);
-                let expected_dist = Self::distance_to_wall(expected, field_half);
-                let error = (b.distance - expected_dist).abs();
-                acc += Self::gaussian(error, stddev, factor);
+        if beams.is_empty() {
+            for i in 0..self.len() {
+                self.weight[i] = INV_N;
             }
-            self.weight[i] = if acc.is_finite() { acc } else { 0.0 };
+            return;
+        }
+
+        let mut max_log_w = f32::NEG_INFINITY;
+        let mut log_ws: Vec<f32> = Vec::with_capacity(self.len());
+        for i in 0..self.len() {
+            let mut log_w = 0.0_f32;
+            for b in beams {
+                let origin = self.expected_point(i, b);
+                let expected_dist = Self::distance_to_wall(origin, field_half);
+                let error = (b.distance - expected_dist).abs();
+                let p_hit = Self::gaussian(error, stddev, factor);
+                let p = Z_HIT * p_hit + Z_RAND;
+                let lp = p.max(1e-12).ln();
+                log_w += lp;
+            }
+            if !log_w.is_finite() {
+                log_w = f32::NEG_INFINITY;
+            }
+            if log_w > max_log_w {
+                max_log_w = log_w;
+            }
+            log_ws.push(log_w);
+        }
+
+        // exponentiate after max subtraction to avoid underflow
+        for (i, &lw) in log_ws.iter().enumerate() {
+            let w = (lw - max_log_w).exp();
+            self.weight[i] = if w.is_finite() { w } else { 0.0 };
         }
     }
 
