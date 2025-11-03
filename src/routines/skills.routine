@@ -1,0 +1,29 @@
+set_pose (-48.14, -14.945, -90.0)
+trigger_now "intake"
+trigger_now "scraper_down"
+
+drive_curve
+    point (-48.0, -48.0) max_voltage=6 reverse=false
+    point (-57.5, -48.0, -180.0) max_voltage=6 reverse=false
+drive_for 1500 max_voltage=3 reverse=false
+
+drive_curve
+    point (-36.0, -60.0) max_voltage=6 reverse=true
+    point (0.0, -60.0) max_voltage=9 reverse=true
+    point (36.0, -60.0) max_voltage=9 reverse=true
+    point (48.0, -48.0) max_voltage=6 reverse=true
+
+turn_to_angle 0.0 max_voltage=6 reverse=false
+drive_to (28.0, -48.0) max_voltage=7 reverse=true
+trigger_now "outtake"
+wait 2000
+trigger_now "intake_stop"
+
+trigger_now "intake"
+drive_to (57.5, -48.0) max_voltage=6 reverse=false
+drive_for 1500 max_voltage=3 reverse=false
+
+drive_to (28.0, -48.0) max_voltage=7 reverse=true
+trigger_now "outtake"
+wait 2000
+trigger_now "intake_stop"

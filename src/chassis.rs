@@ -19,7 +19,7 @@ use crate::{
     triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition, TriggerManager},
 };
 
-const USE_MCL_LOCALIZATION: bool = false;
+const USE_MCL_LOCALIZATION: bool = true;
 
 #[derive(Copy, Clone, Debug)]
 pub struct PoseSettings {
