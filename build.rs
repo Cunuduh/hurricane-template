@@ -18,7 +18,6 @@ struct IRPoseSettings {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum IRAction {
     DriveCurve(Vec<(IRPose, IRPoseSettings)>),
-    DriveBoomerang(Vec<(IRPose, IRPoseSettings)>),
     DrivePtp(Vec<(IRPose, IRPoseSettings)>),
     DriveToPoint(IRPose, IRPoseSettings),
     DriveStraight(f64, IRPoseSettings),
@@ -114,43 +113,6 @@ fn parse_routine(name: &str, content: &str) -> IRRoutine {
                 points.push((pose, s));
             }
             actions.push(IRAction::DriveCurve(points));
-        } else if line.starts_with("drive_boomerang") {
-            // drive_boomerang
-            //   point (x,y,heading) [attrs]
-            // only accepts max 2 points, extras are ignored
-            let mut points: Vec<(IRPose, IRPoseSettings)> = Vec::new();
-            while let Some(peek) = lines.peek() {
-                if !peek.starts_with("point") {
-                    break;
-                }
-                let l = lines.next().unwrap();
-                let after = l.trim_start_matches("point").trim();
-                let lp = after.find('(').expect("point (");
-                let rp = after.find(')').expect(")");
-                let tuple_str = &after[lp..=rp];
-                let (x, y, h) = parse_tuple(tuple_str);
-                let rest = &after[rp + 1..];
-                let s = parse_attrs(rest);
-                let heading = h.expect("drive_boomerang requires heading for all points");
-                let pose = IRPose {
-                    x,
-                    y,
-                    heading: Some(heading),
-                };
-                points.push((pose, s));
-                if points.len() >= 2 {
-                    while let Some(peek) = lines.peek() {
-                        // eat the rest of the points
-                        if peek.starts_with("point") {
-                            lines.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    break;
-                }
-            }
-            actions.push(IRAction::DriveBoomerang(points));
         } else if line.starts_with("drive_ptp") {
             // drive_ptp
             //   point (x,y[,heading]) [attrs]

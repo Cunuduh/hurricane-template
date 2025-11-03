@@ -19,7 +19,6 @@ struct IRPoseSettings {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum IRAction {
     DriveCurve(Vec<(IRPose, IRPoseSettings)>),
-    DriveBoomerang(Vec<(IRPose, IRPoseSettings)>),
     DrivePtp(Vec<(IRPose, IRPoseSettings)>),
     DriveToPoint(IRPose, IRPoseSettings),
     DriveStraight(f64, IRPoseSettings),
@@ -42,7 +41,7 @@ struct IRRoutine {
 include!(concat!(env!("OUT_DIR"), "/routines_index.rs"));
 
 fn mirror_pose(pose: Pose) -> Pose {
-    // rotate 180 degrees about the origin to map red to blue side
+    // this year the field is point symmetric about the origin
     Pose {
         x: -pose.x,
         y: -pose.y,
@@ -52,7 +51,7 @@ fn mirror_pose(pose: Pose) -> Pose {
 
 fn map_pose(p: IRPose, is_red: bool) -> Pose {
     let pose = if let Some(h) = p.heading {
-        Pose::with_heading(p.x, p.y, h)
+        Pose::with_heading(p.x, p.y, h.to_radians())
     } else {
         Pose::new(p.x, p.y)
     };
@@ -78,13 +77,6 @@ fn map_action(a: IRAction, is_red: bool) -> Action {
                 .map(|(p, s)| (map_pose(p, is_red), map_settings(s)))
                 .collect();
             Action::DriveCurve(pts.into_boxed_slice())
-        }
-        IRAction::DriveBoomerang(v) => {
-            let pts: Vec<(Pose, PoseSettings)> = v
-                .into_iter()
-                .map(|(p, s)| (map_pose(p, is_red), map_settings(s)))
-                .collect();
-            Action::DriveBoomerang(pts.into_boxed_slice())
         }
         IRAction::DrivePtp(v) => {
             let pts: Vec<(Pose, PoseSettings)> = v

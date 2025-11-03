@@ -7,7 +7,6 @@ use vexide::prelude::*;
 use crate::{Robot, chassis::PoseSettings, odometry::Pose, triggers::TriggerCondition};
 pub enum Action {
     DriveCurve(Box<[(Pose, PoseSettings)]>),
-    DriveBoomerang(Box<[(Pose, PoseSettings)]>),
     DrivePtp(Box<[(Pose, PoseSettings)]>),
     DriveToPoint(Pose, PoseSettings),
     DriveStraight(f64, PoseSettings),
@@ -29,12 +28,8 @@ impl Robot {
                 Action::DriveCurve(ref points) => {
                     println!("Goal: DriveCurve to {:?}", points.last().map(|(p, _)| p));
                     self.chassis
-                        .drive_ramsete_catmull_rom(points, 32, 0.005, 0.75)
+                        .drive_spline(points, 32, 0.005, 0.75)
                         .await;
-                }
-                Action::DriveBoomerang(ref points) => {
-                    println!("Goal: DriveBoomerang to {:?}", points.last().map(|(p, _)| p));
-                    self.chassis.drive_boomerang(points, 32, 0.005, 0.75).await;
                 }
                 Action::DrivePtp(ref points) => {
                     println!("Goal: DrivePtp to {:?}", points.last().map(|(p, _)| p));

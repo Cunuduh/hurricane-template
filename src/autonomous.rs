@@ -12,7 +12,7 @@ use crate::{
     odometry::Pose,
     utils::{
         normalize_angle,
-        path::{interpolate_boomerang, interpolate_catmull_rom},
+        path::interpolate_curve,
     },
 };
 
@@ -23,7 +23,7 @@ struct Segment {
 }
 
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
-    pub async fn drive_ramsete_catmull_rom(
+    pub async fn drive_spline(
         &mut self,
         path_waypoints: &[(Pose, PoseSettings)],
         steps: usize,
@@ -33,7 +33,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         // rebase path to start at current pose by prepending current pose as first waypoint
         // inherit settings from the original first waypoint if present
         let mut rebased: Vec<(Pose, PoseSettings)> = Vec::with_capacity(path_waypoints.len() + 1);
-        let start_pose = self.mcl_pose();
+        let mut start_pose = self.mcl_pose();
+        // do not force tangent direction at start unless caller explicitly sets it in the first waypoint
+        start_pose.heading = f64::NAN;
         let first_settings = path_waypoints
             .first()
             .map(|p| p.1)
@@ -41,36 +43,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         rebased.push((start_pose, first_settings));
         rebased.extend_from_slice(path_waypoints);
 
-        let interpolated_path = interpolate_catmull_rom(&rebased, steps);
-        let initialized_profile =
-            compute_motion_profile::<L, R, I>(self, interpolated_path, &rebased);
-        let profile = initialized_profile.profile_points;
-        let times = initialized_profile.times;
-        let total_time = initialized_profile.total_time;
-
-        self.execute_ramsete_profile(profile, times, total_time, b, zeta, steps)
-            .await;
-    }
-
-    pub async fn drive_boomerang(
-        &mut self,
-        path_waypoints: &[(Pose, PoseSettings)],
-        steps: usize,
-        b: f64,
-        zeta: f64,
-    ) {
-        // rebase path to start at current pose by prepending current pose as first waypoint
-        // inherit settings from the original first waypoint if present
-        let mut rebased: Vec<(Pose, PoseSettings)> = Vec::with_capacity(path_waypoints.len() + 1);
-        let start_pose = self.mcl_pose();
-        let first_settings = path_waypoints
-            .first()
-            .map(|p| p.1)
-            .unwrap_or_default();
-        rebased.push((start_pose, first_settings));
-        rebased.extend_from_slice(path_waypoints);
-
-        let interpolated_path = interpolate_boomerang(&rebased, steps);
+        let interpolated_path = interpolate_curve(&rebased, steps);
         let initialized_profile =
             compute_motion_profile::<L, R, I>(self, interpolated_path, &rebased);
         let profile = initialized_profile.profile_points;
@@ -119,6 +92,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut seg_i = 0;
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
+        let mut last_w: Option<f64> = None;
         let safety_timeout =
             Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(1500));
 
@@ -244,24 +218,42 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     x.sin() / x
                 }
             }
-            let mut k = 2.0 * zeta * (w_d * w_d + b * v_d * v_d).sqrt();
-            const K_MIN: f64 = 5.0;
-            k = k.max(K_MIN);
-            let v_base = v_d * e_theta.cos() + k * e_x;
-            let v_boost = if dist_err < 3.0 && v_d.abs() < 0.1 && e_x.abs() > 0.2 {
-                e_x.signum() * 0.3 * (dist_err / 3.0)
+            let k = 2.0 * zeta * (w_d * w_d + b * v_d * v_d).sqrt();
+            let v = v_d * e_theta.cos() + k * e_x;
+            let w = w_d + k * e_theta + b * v_d * sinc(e_theta) * e_y;
+
+            let a_d = if seg_data.t.abs() > 1e-9 {
+                ((v1 - v0) / seg_data.t) * reversed
             } else {
                 0.0
             };
-            let v = v_base + v_boost;
-            let w = w_d + k * e_theta + b * v_d * sinc(e_theta) * e_y;
+            let ks = self.config.ff_ks;
+            let kv_lin = self.config.ff_kv;
+            let ka_lin = self.config.ff_ka;
+            let kv_ang = self.config.ff_kv_ang;
+            let ka_ang = self.config.ff_ka_ang;
 
-            let wheel_vel_l = v - w * self.config.track_width / 2.0;
-            let wheel_vel_r = v + w * self.config.track_width / 2.0;
-            let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0)
-                * (self.config.wheel_diameter * PI);
-            let mut target_vl = (wheel_vel_l / max_linear_vel) * self.config.max_volts;
-            let mut target_vr = (wheel_vel_r / max_linear_vel) * self.config.max_volts;
+            // compute angular acceleration from discrete derivative over loop dt
+            let alpha_d = if let Some(prev_w) = last_w {
+                if dt_loop > 1e-6 {
+                    (w - prev_w) / dt_loop
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
+            last_w = Some(w);
+
+            let u_lin = kv_lin * v + ka_lin * a_d;
+            let u_ang = kv_ang * w + ka_ang * alpha_d;
+
+            let mut target_vl = u_lin - u_ang;
+            let mut target_vr = u_lin + u_ang;
+
+            // add static friction per side based on sign
+            target_vl += ks * target_vl.signum();
+            target_vr += ks * target_vr.signum();
 
             if seg_max_voltage <= 0.0 {
                 target_vl = 0.0;

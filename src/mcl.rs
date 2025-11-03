@@ -26,6 +26,11 @@ const REINIT_SPREAD: f32 = 8.0;
 const UNIFORM_PARTICLE_RATIO: f32 = 0.2;
 const FIELD_HALF: f32 = 72.0; // +/- 72 inches for VRC field
 
+const MIN_BEAMS_FOR_UPDATE: usize = 2;
+const MAX_DIST_SINCE_UPDATE: f64 = 2.0; // inches
+const DYN_STDDEV_SCALE: f32 = 0.05; // extra stddev per inch of measured distance
+const RESAMPLE_JITTER: f32 = 0.05; // small uniform jitter after resample
+
 const SIMD_WIDTH: usize = 4;
 
 fn sum_particle_components(particles: &Particles) -> (f32, f32, f32) {
@@ -114,6 +119,23 @@ impl Particles {
             y,
             theta,
             weight,
+        }
+    }
+
+    fn repair_out_of_field(&mut self, rng: &mut SystemRng, field_half: f32) {
+        for i in 0..self.len() {
+            let mut xi = self.x[i];
+            let mut yi = self.y[i];
+            if xi < -field_half || xi > field_half {
+                let u = next_f32(rng) * 2.0 - 1.0;
+                xi = u * field_half;
+            }
+            if yi < -field_half || yi > field_half {
+                let u = next_f32(rng) * 2.0 - 1.0;
+                yi = u * field_half;
+            }
+            self.x[i] = xi;
+            self.y[i] = yi;
         }
     }
 
@@ -214,7 +236,8 @@ impl Particles {
                 let origin = self.expected_point(i, b);
                 let expected_dist = Self::distance_to_wall(origin, field_half);
                 let error = (b.distance - expected_dist).abs();
-                let p_hit = Self::gaussian(error, stddev, factor);
+                let stddev_dyn = stddev + DYN_STDDEV_SCALE * b.distance;
+                let p_hit = Self::gaussian(error, stddev_dyn, factor);
                 let p = Z_HIT * p_hit + Z_RAND;
                 let lp = p.max(1e-12).ln();
                 log_w += lp;
@@ -257,6 +280,7 @@ pub struct Mcl {
     average_pose: Pose,
     last_valid_pose: Pose,
     rng: SystemRng,
+    dist_since_update: f64,
 }
 // based on https://www.aadishv.dev/mcl/, but I decided IMU headings are good enough to not need to estimate them
 impl Mcl {
@@ -273,13 +297,17 @@ impl Mcl {
             average_pose: initial_pose,
             last_valid_pose: initial_pose,
             rng: SystemRng::new(),
+            dist_since_update: 0.0,
         }
     }
 
     pub fn run(&mut self, beams: &[Beam], delta_xy: (f64, f64), imu_heading: f64) -> Pose {
         self.update_step(delta_xy, imu_heading);
-        if !beams.is_empty() {
+        // accumulate traveled distance for gated updates
+        self.dist_since_update += (delta_xy.0.hypot(delta_xy.1)).abs();
+        if beams.len() >= MIN_BEAMS_FOR_UPDATE && self.dist_since_update >= MAX_DIST_SINCE_UPDATE {
             self.resample_step(beams);
+            self.dist_since_update = 0.0;
         }
         let mut p = self.average_pose;
         p.heading = imu_heading;
@@ -308,57 +336,24 @@ impl Mcl {
         }
         sum
     }
-    fn handle_degens(&mut self, total_weight: f32) {
-        if total_weight > 0.0 && total_weight.is_finite() {
-            return;
-        }
-
-        println!(
-            "MCL weights degenerate (total={}), reinitializing around last valid pose",
-            total_weight
-        );
-
-        let cx = self.last_valid_pose.x as f32;
-        let cy = self.last_valid_pose.y as f32;
-        let ct = self.last_valid_pose.heading as f32;
-
-        let uniform_count = (N as f32 * UNIFORM_PARTICLE_RATIO) as usize;
-        let clustered_count = N - uniform_count;
-
-        for i in 0..clustered_count {
-            let nx = (next_f32(&mut self.rng) * 2.0) - 1.0;
-            let ny = (next_f32(&mut self.rng) * 2.0) - 1.0;
-            self.particles.x[i] = cx + nx * REINIT_SPREAD;
-            self.particles.y[i] = cy + ny * REINIT_SPREAD;
-            self.particles.theta[i] = ct;
-            self.particles.weight[i] = INV_N;
-        }
-
-        for i in clustered_count..N {
-            let rx = (next_f32(&mut self.rng) * 2.0 - 1.0) * FIELD_HALF;
-            let ry = (next_f32(&mut self.rng) * 2.0 - 1.0) * FIELD_HALF;
-            self.particles.x[i] = rx;
-            self.particles.y[i] = ry;
-            self.particles.theta[i] = ct;
-            self.particles.weight[i] = INV_N * 0.5;
-        }
-        // use plain odometry pose as current estimate in this case
-        self.average_pose = self.last_valid_pose;
-    }
 
     fn resample_step(&mut self, beams: &[Beam]) {
+        // keep particles within field before computing weights
+        self.particles.repair_out_of_field(&mut self.rng, FIELD_HALF);
         self.particles
             .update_weight(beams, FIELD_HALF, GAUSSIAN_STDDEV, GAUSSIAN_FACTOR);
 
         let total_weight = self.clamp_weights();
 
-        if total_weight > 0.0 && total_weight.is_finite() {
-            self.last_valid_pose = self.average_pose;
-        }
-
-        self.handle_degens(total_weight);
         if total_weight <= 0.0 || !total_weight.is_finite() {
+            println!(
+                "MCL warning: total weight invalid ({}), skipping resample",
+                total_weight
+            );
             return;
+        }
+        if total_weight.is_finite() {
+            self.last_valid_pose = self.average_pose;
         }
         self.resampled_particles.clear();
         let weight_len = self.weight_buffer.len();
@@ -379,6 +374,16 @@ impl Mcl {
                 .push_copy_from(&self.particles, idx);
         }
         mem::swap(&mut self.particles, &mut self.resampled_particles);
+
+        // small jitter to reduce particle impoverishment
+        if RESAMPLE_JITTER > 0.0 {
+            for i in 0..N {
+                let jx = (next_f32(&mut self.rng) * 2.0 - 1.0) * RESAMPLE_JITTER;
+                let jy = (next_f32(&mut self.rng) * 2.0 - 1.0) * RESAMPLE_JITTER;
+                self.particles.x[i] += jx;
+                self.particles.y[i] += jy;
+            }
+        }
 
         let (sx, sy, st) = sum_particle_components(&self.particles);
         self.average_pose = Pose {
