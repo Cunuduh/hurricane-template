@@ -8,49 +8,41 @@ use vexide::{prelude::*, time::Instant};
 
 use crate::{
     chassis::PoseSettings,
-    motion_controller::{ProfilePoint, compute_motion_profile},
+    motion_controller::{ProfilePoint, compute_motion_profile, TrapezoidalProfile},
     odometry::Pose,
-    utils::{
-        normalize_angle,
-        path::interpolate_curve,
-    },
+    utils::{normalize_angle, path::interpolate_curve},
 };
 
 struct Segment {
     delta_h: f64,
     t: f64,
-    w_d: f64,
 }
 
 impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     pub async fn drive_spline(
         &mut self,
         path_waypoints: &[(Pose, PoseSettings)],
-        steps: usize,
+        step_size: f64,
         b: f64,
         zeta: f64,
     ) {
         // rebase path to start at current pose by prepending current pose as first waypoint
         // inherit settings from the original first waypoint if present
         let mut rebased: Vec<(Pose, PoseSettings)> = Vec::with_capacity(path_waypoints.len() + 1);
-        let mut start_pose = self.mcl_pose();
-        // do not force tangent direction at start unless caller explicitly sets it in the first waypoint
-        start_pose.heading = f64::NAN;
-        let first_settings = path_waypoints
-            .first()
-            .map(|p| p.1)
-            .unwrap_or_default();
+        let start_pose = self.mcl_pose();
+        let first_settings = path_waypoints.first().map(|p| p.1).unwrap_or_default();
         rebased.push((start_pose, first_settings));
         rebased.extend_from_slice(path_waypoints);
 
-        let interpolated_path = interpolate_curve(&rebased, steps);
+        let interpolated_path = interpolate_curve(&rebased, step_size);
         let initialized_profile =
             compute_motion_profile::<L, R, I>(self, interpolated_path, &rebased);
         let profile = initialized_profile.profile_points;
         let times = initialized_profile.times;
         let total_time = initialized_profile.total_time;
-
-        self.execute_ramsete_profile(profile, times, total_time, b, zeta, steps)
+        // 1550.0 is approx 39.37^2, converting b (m^-2) to in^-2
+        let b_inches = b / 1550.0;
+        self.execute_ramsete_profile(profile, times, total_time, b_inches, zeta)
             .await;
     }
 
@@ -61,7 +53,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         total_time: f64,
         b: f64,
         zeta: f64,
-        steps: usize,
     ) {
         let m = profile.len();
         if m < 2 {
@@ -72,29 +63,30 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         for i in 0..(m - 1) {
             let p0_h = profile[i].point.heading;
             let p1_h = profile[i + 1].point.heading;
-
             let current_delta_h = normalize_angle(p1_h - p0_h);
             let delta_t = times[i + 1] - times[i];
-
-            let w_d = current_delta_h / delta_t;
             segments.push(Segment {
                 delta_h: current_delta_h,
                 t: delta_t,
-                w_d,
             });
         }
 
-        let wp_count = if steps > 0 { (m - 1) / steps + 1 } else { 1 };
         let mut last_wp = None;
 
+        let mut vr_prev: Option<f64> = Some(profile[0].velocity);
+        let mut wr_prev: Option<f64> = Some(profile[0].angular_velocity);
         let mut last_time = Instant::now();
         let start_time = last_time;
         let mut seg_i = 0;
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
-        let mut last_w: Option<f64> = None;
         let safety_timeout =
-            Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(1500));
+            Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(400));
+
+        let mut settle_drive_pid = self.config.drive_pid;
+        let mut settle_turn_pid = self.config.turn_pid;
+        settle_drive_pid.reset();
+        settle_turn_pid.reset();
 
         loop {
             let now = Instant::now();
@@ -117,8 +109,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let dx_end = goal.x - current.x;
             let dy_end = goal.y - current.y;
             let dist_err = dx_end.hypot(dy_end);
+            let heading_err = normalize_angle(goal.heading - current.heading)
+                .abs()
+                .to_degrees();
 
-            if dist_err <= self.config.small_drive_exit_error {
+            let position_satisfied = dist_err <= self.config.small_drive_exit_error;
+            let heading_satisfied = heading_err <= self.config.small_turn_exit_error;
+
+            if position_satisfied && heading_satisfied {
                 big_timer = None;
                 if small_timer.is_none() {
                     small_timer = Some(Instant::now());
@@ -131,7 +129,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             } else {
                 small_timer = None;
-                if dist_err <= self.config.big_drive_exit_error {
+                let big_position = dist_err <= self.config.big_drive_exit_error;
+                let big_heading = heading_err <= self.config.big_turn_exit_error;
+                if big_position && big_heading {
                     if big_timer.is_none() {
                         big_timer = Some(Instant::now());
                     }
@@ -146,125 +146,160 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             }
 
-            while seg_i < m - 2 && elapsed >= times[seg_i + 1] {
-                seg_i += 1;
-            }
-            let i = seg_i;
+            let mut target_vl;
+            let mut target_vr;
 
-            if wp_count > 1 {
-                let wp_idx = if i >= (wp_count - 1) * steps {
-                    wp_count - 1
-                } else {
-                    i / steps
-                };
+            if elapsed >= total_time {
+                let final_pose = profile.last().unwrap().point;
+                let current = self.mcl_pose();
 
+                let dx = final_pose.x - current.x;
+                let dy = final_pose.y - current.y;
+                let dist_error = dx * final_pose.heading.cos() + dy * final_pose.heading.sin();
+
+                let heading_error = normalize_angle(final_pose.heading - current.heading);
+
+                let mut drive_output = settle_drive_pid.next(dist_error, dt_loop);
+                let turn_output = settle_turn_pid.next(heading_error, dt_loop);
+
+                const TURN_BIAS: f64 = 0.8;
+                let turn_bias_scale =
+                    (1.0 - ((1.0 - heading_error.cos()) / TURN_BIAS)).clamp(0.0, 1.0);
+                drive_output *= turn_bias_scale;
+
+                target_vl = drive_output - turn_output;
+                target_vr = drive_output + turn_output;
+            } else {
+                while seg_i < m - 2 && elapsed >= times[seg_i + 1] {
+                    seg_i += 1;
+                }
+                let i = seg_i;
+
+                let wp_idx = profile[i].waypoint_index;
                 if Some(wp_idx) != last_wp && wp_idx > 0 {
                     let actions = self.triggers.check_index(wp_idx);
                     self.apply_trigger_actions(&actions);
                     last_wp = Some(wp_idx);
                 }
-            }
-            let seg_data = &segments[i];
+                let seg_data = &segments[i];
 
-            let p0 = &profile[i].point;
-            let p1 = &profile[i + 1].point;
-            let p0_heading = p0.heading;
+                let p0 = &profile[i].point;
+                let p1 = &profile[i + 1].point;
+                let p0_heading = p0.heading;
 
-            let (tau, w_d) = if seg_data.t.abs() < 1e-9 {
-                (0.0, seg_data.w_d)
-            } else {
-                let t0 = times[i];
-                (((elapsed - t0) / seg_data.t).clamp(0.0, 1.0), seg_data.w_d)
-            };
-
-            let max_voltage_0 = profile[i].max_voltage.min(self.config.max_volts);
-            let max_voltage_1 = profile[i + 1].max_voltage.min(self.config.max_volts);
-            let seg_max_voltage = if max_voltage_0 <= 0.0 && max_voltage_1 <= 0.0 {
-                0.0
-            } else {
-                let interpolated = max_voltage_0 + (max_voltage_1 - max_voltage_0) * tau;
-                interpolated.clamp(0.0, self.config.max_volts)
-            };
-
-            let traveled =
-                profile[i].distance + (profile[i + 1].distance - profile[i].distance) * tau;
-            let actions = self.triggers.check_distance(traveled);
-            self.apply_trigger_actions(&actions);
-
-            let x_d = p0.x + (p1.x - p0.x) * tau;
-            let y_d = p0.y + (p1.y - p0.y) * tau;
-
-            let mut heading_d = p0_heading + seg_data.delta_h * tau;
-            heading_d = normalize_angle(heading_d);
-
-            let v0 = profile[i].velocity;
-            let v1 = profile[i + 1].velocity;
-            let reversed = if profile[i].is_reversed { -1.0 } else { 1.0 };
-            let v_d = (v0 + (v1 - v0) * tau) * reversed;
-
-            let pose = self.mcl_pose();
-            let dx = x_d - pose.x;
-            let dy = y_d - pose.y;
-            let e_x = dx * pose.heading.cos() + dy * pose.heading.sin();
-            let e_y = -dx * pose.heading.sin() + dy * pose.heading.cos();
-            let e_theta = normalize_angle(heading_d - pose.heading);
-
-            #[inline]
-            fn sinc(x: f64) -> f64 {
-                if x.abs() < 1e-4 {
-                    // use second term of taylor series of sin(x)/x as a decent approximation
-                    1.0 - x * x / 6.0
+                let (tau, w_r) = if seg_data.t.abs() < 1e-9 {
+                    (0.0, 0.0)
                 } else {
-                    x.sin() / x
+                    let t0 = times[i];
+                    let tau_local = ((elapsed - t0) / seg_data.t).clamp(0.0, 1.0);
+                    // interpolate reference angular velocity
+                    let w0 = profile[i].angular_velocity;
+                    let w1 = profile[i + 1].angular_velocity;
+                    let w_interp = w0 + (w1 - w0) * tau_local;
+                    (tau_local, w_interp)
+                };
+
+                let max_voltage_0 = profile[i].max_voltage.min(self.config.max_volts);
+                let max_voltage_1 = profile[i + 1].max_voltage.min(self.config.max_volts);
+                let seg_max_voltage = if max_voltage_0 <= 0.0 && max_voltage_1 <= 0.0 {
+                    0.0
+                } else {
+                    let interpolated = max_voltage_0 + (max_voltage_1 - max_voltage_0) * tau;
+                    interpolated.clamp(0.0, self.config.max_volts)
+                };
+
+                let traveled =
+                    profile[i].distance + (profile[i + 1].distance - profile[i].distance) * tau;
+                let actions = self.triggers.check_distance(traveled);
+                self.apply_trigger_actions(&actions);
+
+                let x_d = p0.x + (p1.x - p0.x) * tau;
+                let y_d = p0.y + (p1.y - p0.y) * tau;
+
+                let mut heading_d = p0_heading + seg_data.delta_h * tau;
+                heading_d = normalize_angle(heading_d);
+
+                let v0 = profile[i].velocity;
+                let v1 = profile[i + 1].velocity;
+                let reversed = if profile[i].is_reversed { -1.0 } else { 1.0 };
+                let v_d = (v0 + (v1 - v0) * tau) * reversed;
+                let w_r = w_r * reversed;
+
+                let pose = self.mcl_pose();
+                let dx = x_d - pose.x;
+                let dy = y_d - pose.y;
+                let e_x = dx * pose.heading.cos() + dy * pose.heading.sin();
+                let e_y = -dx * pose.heading.sin() + dy * pose.heading.cos();
+                let e_theta = normalize_angle(heading_d - pose.heading);
+
+                #[inline]
+                fn sinc(x: f64) -> f64 {
+                    if x.abs() < 1e-4 {
+                        1.0 - x * x / 6.0
+                    } else {
+                        x.sin() / x
+                    }
                 }
-            }
-            let k = 2.0 * zeta * (w_d * w_d + b * v_d * v_d).sqrt();
-            let v = v_d * e_theta.cos() + k * e_x;
-            let w = w_d + k * e_theta + b * v_d * sinc(e_theta) * e_y;
+                let k = 2.0 * zeta * (w_r * w_r + b * v_d * v_d).sqrt();
+                let v = v_d * e_theta.cos() + k * e_x;
+                let w = w_r + k * e_theta + b * v_d * sinc(e_theta) * e_y;
 
-            let a_d = if seg_data.t.abs() > 1e-9 {
-                ((v1 - v0) / seg_data.t) * reversed
-            } else {
-                0.0
-            };
-            let ks = self.config.ff_ks;
-            let kv_lin = self.config.ff_kv;
-            let ka_lin = self.config.ff_ka;
-            let kv_ang = self.config.ff_kv_ang;
-            let ka_ang = self.config.ff_ka_ang;
-
-            // compute angular acceleration from discrete derivative over loop dt
-            let alpha_d = if let Some(prev_w) = last_w {
-                if dt_loop > 1e-6 {
-                    (w - prev_w) / dt_loop
+                let a_vr = if let Some(prev) = vr_prev {
+                    (v_d - prev) / dt_loop
                 } else {
                     0.0
+                };
+                vr_prev = Some(v_d);
+
+                let a_wr = if let Some(prev) = wr_prev {
+                    (w_r - prev) / dt_loop
+                } else {
+                    0.0
+                };
+                wr_prev = Some(w_r);
+
+                let ks = self.config.ff_ks;
+                let kv_lin = self.config.ff_kv;
+                let ka_lin = self.config.ff_ka;
+                let kv_ang = self.config.ff_kv_ang;
+                let ka_ang = self.config.ff_ka_ang;
+
+                let u_lin = kv_lin * v + ka_lin * a_vr;
+                let u_ang = kv_ang * w + ka_ang * a_wr;
+
+                target_vl = u_lin - u_ang;
+                target_vr = u_lin + u_ang;
+
+                target_vl += ks * target_vl.signum();
+                target_vr += ks * target_vr.signum();
+
+                if seg_max_voltage <= 0.0 {
+                    target_vl = 0.0;
+                    target_vr = 0.0;
+                } else {
+                    let peak = target_vl.abs().max(target_vr.abs());
+                    if peak > seg_max_voltage {
+                        let linear_component = u_lin + ks * u_lin.signum();
+                        let angular_component_l = -u_ang;
+                        let angular_component_r = u_ang;
+
+                        let mut scaled_linear = linear_component;
+                        if linear_component.abs() > seg_max_voltage {
+                            scaled_linear = seg_max_voltage * linear_component.signum();
+                        }
+
+                        target_vl = scaled_linear + angular_component_l;
+                        target_vr = scaled_linear + angular_component_r;
+
+                        let final_peak = target_vl.abs().max(target_vr.abs());
+                        if final_peak > self.config.max_volts {
+                            let scale = self.config.max_volts / final_peak;
+                            target_vl *= scale;
+                            target_vr *= scale;
+                        }
+                    }
                 }
-            } else {
-                0.0
-            };
-            last_w = Some(w);
 
-            let u_lin = kv_lin * v + ka_lin * a_d;
-            let u_ang = kv_ang * w + ka_ang * alpha_d;
-
-            let mut target_vl = u_lin - u_ang;
-            let mut target_vr = u_lin + u_ang;
-
-            // add static friction per side based on sign
-            target_vl += ks * target_vl.signum();
-            target_vr += ks * target_vr.signum();
-
-            if seg_max_voltage <= 0.0 {
-                target_vl = 0.0;
-                target_vr = 0.0;
-            } else {
-                let peak = target_vl.abs().max(target_vr.abs());
-                if peak > seg_max_voltage {
-                    let scale = seg_max_voltage / peak;
-                    target_vl *= scale;
-                    target_vr *= scale;
-                }
             }
 
             let vl = target_vl.clamp(-self.config.max_volts, self.config.max_volts);
@@ -304,9 +339,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.update_state();
         let start_pose = self.odometry.pose();
         let initial_heading = start_pose.heading;
-        
+
         let drive_direction = if settings.is_reversed { -1.0 } else { 1.0 };
-        
+
         let dx = target.x - start_pose.x;
         let dy = target.y - start_pose.y;
         let total_dist = dx.hypot(dy);
@@ -323,14 +358,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let start_time = last_time;
         let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0)
             * (self.config.wheel_diameter * PI);
-        let estimated_vel = max_linear_vel * (settings.max_voltage / self.config.max_volts) * 0.8;
-        let estimated_time = if estimated_vel > 0.1 {
-            total_dist / estimated_vel
-        } else {
-            total_dist / 0.1
-        };
+        
+        let max_v = max_linear_vel * (settings.max_voltage / self.config.max_volts);
+        let max_a = max_linear_vel / self.config.t_accel;
+        let profile = TrapezoidalProfile::new(total_dist, max_v, max_a);
+        
         let safety_timeout =
-            Duration::from_millis(((estimated_time * 1000.0) as u64).saturating_add(250));
+            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(250));
 
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
@@ -343,6 +377,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 continue;
             }
             last_time = now;
+            let elapsed = now.duration_since(start_time).as_secs_f64();
 
             self.update_state();
             self.service_autonomous_intake();
@@ -401,8 +436,16 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 .next(heading_error, dt)
                 .clamp(-settings.max_voltage, settings.max_voltage);
 
-            let mut drive_output = drive_pid
-                .next(error, dt)
+            let (p_ref, v_ref, a_ref) = profile.sample(elapsed);
+            let error = p_ref - traveled_along;
+
+            let kv = self.config.ff_kv;
+            let ka = self.config.ff_ka;
+            let ks = self.config.ff_ks;
+
+            let u_ff = kv * v_ref + ka * a_ref;
+
+            let mut drive_output = (u_ff + drive_pid.next(error, dt))
                 .clamp(-settings.max_voltage, settings.max_voltage);
             // scale down linear speed when there is a large heading error
             const TURN_BIAS: f64 = 0.8;
@@ -411,10 +454,19 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             drive_output *= drive_direction;
 
             // compute motor voltages combining forward drive and heading correction
-            let left_v = (drive_output - heading_correction)
-                .clamp(-self.config.max_volts, self.config.max_volts);
-            let right_v = (drive_output + heading_correction)
-                .clamp(-self.config.max_volts, self.config.max_volts);
+            let mut left_v = drive_output - heading_correction;
+            let mut right_v = drive_output + heading_correction;
+
+            // add static friction feedforward
+            if left_v.abs() > 1e-3 {
+                left_v += ks * left_v.signum();
+            }
+            if right_v.abs() > 1e-3 {
+                right_v += ks * right_v.signum();
+            }
+
+            left_v = left_v.clamp(-self.config.max_volts, self.config.max_volts);
+            right_v = right_v.clamp(-self.config.max_volts, self.config.max_volts);
 
             for m in self.left_motors.iter_mut() {
                 let _ = m.set_voltage(left_v);
@@ -449,7 +501,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let turn_v = settings.max_voltage.min(self.config.max_volts).max(1.0);
         let heading_delta = normalize_angle(turn_heading - self.odometry.pose().heading);
         if heading_delta.abs().to_degrees() > self.config.small_turn_exit_error {
-            self.turn_to_angle(turn_heading.to_degrees(), turn_v, false).await;
+            self.turn_to_angle(turn_heading.to_degrees(), turn_v, false)
+                .await;
         }
 
         self.update_state();
@@ -468,11 +521,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.drive_linear(&path).await;
     }
 
-    pub async fn turn_to_point(&mut self, x: f64, y: f64, v: f64) {
+    pub async fn turn_to_point(&mut self, x: f64, y: f64, v: f64, reverse: bool) {
         self.update_state();
         let p = self.mcl_pose();
         let a = (y - p.y).atan2(x - p.x);
-        self.turn_to_angle(a.to_degrees(), v, false).await;
+        self.turn_to_angle(a.to_degrees(), v, reverse).await;
     }
 
     pub async fn turn_to_angle(&mut self, a_deg: f64, v: f64, reverse: bool) {
@@ -481,7 +534,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.stall_timer = None;
         let mut a = normalize_angle(a_deg.to_radians());
         let initial_heading = self.mcl_pose().heading;
-        
+
         if reverse {
             let shortest_error = normalize_angle(a - initial_heading);
             if shortest_error > 0.0 {
@@ -494,18 +547,24 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut ts: Option<Instant> = None;
         let mut tb: Option<Instant> = None;
         let start_time = Instant::now();
-        // estimate timeout similar to drive_linear but for angular motion
-        let planned_delta = if reverse {
-            (a - initial_heading).abs()
+        let diff = if reverse {
+            a - initial_heading
         } else {
-            normalize_angle(a - initial_heading).abs()
+            normalize_angle(a - initial_heading)
         };
+        let direction = diff.signum();
+        let planned_delta = diff.abs();
         let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0)
             * (self.config.wheel_diameter * PI);
-        let voltage_scale = (v.min(self.config.max_volts) / self.config.max_volts).clamp(0.0, 1.0);
-        let estimated_w = (2.0 * max_linear_vel / self.config.track_width) * voltage_scale * 0.8;
-        let estimated_time = if estimated_w > 0.1 { planned_delta / estimated_w } else { planned_delta / 0.1 };
-        let safety_timeout = Duration::from_millis(((estimated_time * 1000.0) as u64).saturating_add(250));
+        let max_angular_vel = 2.0 * max_linear_vel / self.config.track_width;
+
+        let max_v = max_angular_vel * (v.min(self.config.max_volts) / self.config.max_volts);
+        let max_a = max_angular_vel / self.config.t_accel;
+
+        let profile = TrapezoidalProfile::new(planned_delta, max_v, max_a);
+
+        let safety_timeout =
+            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(250));
 
         let small_exit_deg = self.config.small_turn_exit_error;
         let big_exit_deg = self.config.big_turn_exit_error;
@@ -577,12 +636,40 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     tb = None;
                 }
             }
-            let u = pid.next(e, dt).clamp(-v, v);
+            let elapsed = t.duration_since(start_time).as_secs_f64();
+            let (p_ref, v_ref, a_ref) = profile.sample(elapsed);
+
+            let kv = self.config.ff_kv_ang;
+            let ka = self.config.ff_ka_ang;
+            let ks = self.config.ff_ks;
+
+            let u_ff = (kv * v_ref + ka * a_ref) * direction;
+
+            let target_h = initial_heading + direction * p_ref;
+            let error_h = normalize_angle(target_h - h);
+
+            let u_fb = pid.next(error_h, dt);
+
+            let u = (u_ff + u_fb).clamp(-v, v);
+
+            let mut left_v = -u;
+            let mut right_v = u;
+
+            if left_v.abs() > 1e-3 {
+                left_v += ks * left_v.signum();
+            }
+            if right_v.abs() > 1e-3 {
+                right_v += ks * right_v.signum();
+            }
+
+            left_v = left_v.clamp(-self.config.max_volts, self.config.max_volts);
+            right_v = right_v.clamp(-self.config.max_volts, self.config.max_volts);
+
             for m in self.left_motors.iter_mut() {
-                let _ = m.set_voltage(-u);
+                let _ = m.set_voltage(left_v);
             }
             for m in self.right_motors.iter_mut() {
-                let _ = m.set_voltage(u);
+                let _ = m.set_voltage(right_v);
             }
         }
 
@@ -647,9 +734,17 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     pub async fn drive_straight(&mut self, target_dist: f64, max_voltage: f64, reverse: bool) {
         self.update_state();
         let start = self.odometry.pose();
-        let effective_reverse = if reverse { true } else { target_dist.is_sign_negative() };
+        let effective_reverse = if reverse {
+            true
+        } else {
+            target_dist.is_sign_negative()
+        };
         let magnitude = target_dist.abs();
-        let signed_dist = if effective_reverse { -magnitude } else { magnitude };
+        let signed_dist = if effective_reverse {
+            -magnitude
+        } else {
+            magnitude
+        };
         let dx = start.heading.cos() * signed_dist;
         let dy = start.heading.sin() * signed_dist;
         let start_pose = Pose {
@@ -688,7 +783,11 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             for m in self.right_motors.iter_mut() {
                 let _ = m.set_voltage(v_clamped);
             }
-            let step = if total - elapsed > dt { dt } else { total - elapsed };
+            let step = if total - elapsed > dt {
+                dt
+            } else {
+                total - elapsed
+            };
             sleep(step).await;
             elapsed += step;
         }

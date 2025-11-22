@@ -10,7 +10,6 @@ use core::{
 };
 
 use vexide::{devices::smart::imu::InertialSensor, prelude::*};
-
 use crate::{
     chassis::{Chassis, ChassisArgs, ChassisConfig},
     odometry::{Pose, TrackingWheelConfig},
@@ -166,6 +165,10 @@ const AUTON_TRIGGER_DEFINITIONS: &[TriggerDefinition] = &[
         name: "alt_colour_sort_disable",
         actions: &[TriggerAction::SetAltColourSortEnabled(false)],
     },
+    TriggerDefinition {
+        name: "reset_xy",
+        actions: &[TriggerAction::ResetXY],
+    },
 ];
 
 #[vexide::main]
@@ -185,14 +188,11 @@ async fn main(peripherals: Peripherals) {
     // load saved alliance from sd
     if let Ok(saved) = fs::read_to_string(ALLIANCE_SAVE_PATH) {
         let s = saved.trim().to_ascii_lowercase();
-        let is_red = matches!(
-            &s[..],
-            "red" | "r" | "1" | "true" | "t" | "yes" | "y"
-        );
+        let is_red = matches!(&s[..], "red" | "r" | "1" | "true" | "t" | "yes" | "y");
         ui.set_is_red_alliance(is_red);
         IS_RED_ALLIANCE.store(is_red, Ordering::Relaxed);
     }
-    
+
     let ui_clone = ui.as_weak();
     vexide::task::spawn(async move {
         let mut last_is_red: Option<bool> = None;
@@ -203,14 +203,19 @@ async fn main(peripherals: Peripherals) {
                 if last_is_red != Some(is_red) {
                     let _ = fs::write(
                         ALLIANCE_SAVE_PATH,
-                        if is_red { b"red" as &[u8] } else { b"blue" as &[u8] },
+                        if is_red {
+                            b"red" as &[u8]
+                        } else {
+                            b"blue" as &[u8]
+                        },
                     );
                     last_is_red = Some(is_red);
                 }
             }
             sleep(Duration::from_millis(100)).await;
         }
-    }).detach();
+    })
+    .detach();
     // set routes from embedded routines
     {
         let names = routines::list_names();
@@ -343,9 +348,9 @@ impl Robot {
             wheel_diameter: 2.0,
         };
 
-        let drive_pid = Pid::new(3.5, 0.0, 0.25, 0.0);
-        let turn_pid = Pid::new(50.0, 0.0, 3.5, 0.0);
-        let heading_pid = Pid::new(15.0, 0.0, 0.0, 0.0);
+        let drive_pid = Pid::new(2.0, 0.0, 0.2, 0.0);
+        let turn_pid = Pid::new(9.0, 0.0, 0.8, 0.0);
+        let heading_pid = Pid::new(2.0, 0.0, 0.0, 0.0);
 
         let config = ChassisConfig {
             initial_pose: Pose {
@@ -357,11 +362,11 @@ impl Robot {
             ext_gear_ratio: 48.0 / 36.0,
             track_width: 15.0,
             max_volts: 12.0,
-            ff_ks: 0.096,
+            ff_ks: 0.75,
             ff_kv: 0.1664,
             ff_ka: 0.000829,
-            ff_kv_ang: 1.065,
-            ff_ka_ang: 0.191,
+            ff_kv_ang: 1.248,
+            ff_ka_ang: 0.0062175,
             dt: Duration::from_millis(10),
             turn_pid,
             heading_pid,
@@ -380,7 +385,7 @@ impl Robot {
             stall_velocity_threshold: 1.0,
             stall_time: Duration::from_millis(400),
 
-            accel_t: 0.25, // time to reach max velocity
+            t_accel: 0.5,
             tw_config,
         };
         let chassis = Chassis::new(ChassisArgs {
@@ -426,7 +431,10 @@ impl Compete for Robot {
         let target = if idx < routines.len() { idx } else { 0 };
         let plan = routines.into_iter().nth(target).map(|(_, p)| p).unwrap();
         let _ = self.chassis.optical_sensor.set_led_brightness(1.0);
-        let _ = self.chassis.optical_sensor.set_integration_time(Duration::from_millis(40));
+        let _ = self
+            .chassis
+            .optical_sensor
+            .set_integration_time(Duration::from_millis(40));
         self.run_plan(plan).await;
     }
 
@@ -440,7 +448,10 @@ impl Compete for Robot {
         for m in self.chassis.intake_motors.iter_mut() {
             let _ = m.set_voltage(0.0);
         }
-        let _ = self.chassis.optical_sensor.set_integration_time(Duration::from_millis(40));
+        let _ = self
+            .chassis
+            .optical_sensor
+            .set_integration_time(Duration::from_millis(40));
         let _ = self.chassis.optical_sensor.set_led_brightness(1.0);
         loop {
             let _ = self.chassis.optical_sensor.set_led_brightness(1.0);
@@ -472,9 +483,9 @@ impl Compete for Robot {
             if c_state.button_l1.is_now_pressed() {
                 self.chassis.toggle_hood();
             }
-            if c_state.button_x.is_now_pressed() {
-                self.chassis.toggle_colour_sort();
-            }
+            // if c_state.button_x.is_now_pressed() {
+            //     self.chassis.toggle_colour_sort();
+            // }
             // run block park macro after intake subsystem so it can override motor outputs
             self.chassis.service_block_park_macro();
             sleep(self.chassis.config.dt).await;

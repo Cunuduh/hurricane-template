@@ -36,6 +36,7 @@ pub enum TriggerAction {
     TogglePneumatic(PneumaticTarget),
     SetColourSortEnabled(bool),
     SetAltColourSortEnabled(bool),
+    ResetXY,
 }
 
 pub struct TriggerDefinition {

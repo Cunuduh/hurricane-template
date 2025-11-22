@@ -87,6 +87,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
     pub fn toggle_scraper(&mut self) {
         let _ = self.scraper.toggle();
+        self.scraper_up = !self.scraper_up;
     }
     pub fn toggle_wings(&mut self) {
         let _ = self.wings.toggle();

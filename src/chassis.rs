@@ -10,16 +10,17 @@ use vexide::{
     prelude::*,
     time::Instant,
 };
-
+use core::f64::consts::PI;
 use crate::{
     VexSelector,
     mcl::{Beam, Mcl},
     odometry::{Odometry, Pose, TrackingWheelConfig},
     pid::Pid,
     triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition, TriggerManager},
+    utils::normalize_angle,
 };
 
-const USE_MCL_LOCALIZATION: bool = true;
+const USE_MCL_LOCALIZATION: bool = false;
 
 #[derive(Copy, Clone, Debug)]
 pub struct PoseSettings {
@@ -64,7 +65,7 @@ pub struct ChassisConfig {
     pub stall_velocity_threshold: f64,
     pub stall_time: Duration,
 
-    pub accel_t: f64,
+    pub t_accel: f64,
 
     pub tw_config: TrackingWheelConfig,
 }
@@ -98,21 +99,20 @@ impl BlockCounter {
         Self {
             block_count: 0,
             detect_threshold: 0.35,
-            release_threshold: 0.15,
+            release_threshold: 0.25,
             block_detected: false,
             last_count_time: Instant::now(),
-            min_time_between_blocks: Duration::from_millis(40),
+            min_time_between_blocks: Duration::from_millis(50),
             activation_delay: Duration::from_millis(250),
         }
     }
     pub fn update(&mut self, proximity: f64) -> bool {
         let mut new_block = false;
         if !self.block_detected && proximity > self.detect_threshold {
-            // only count if enough time has passed since last block
+            new_block = true;
             if Instant::now().duration_since(self.last_count_time) > self.min_time_between_blocks {
                 self.block_count += 1;
                 self.last_count_time = Instant::now();
-                new_block = true;
             }
             self.block_detected = true;
         } else if self.block_detected && proximity < self.release_threshold {
@@ -145,6 +145,8 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub outtake_middle_jam_reverse_until: Option<Instant>,
     pub outtake_middle_initial_reverse_until: Option<Instant>,
     pub scraper: AdiDigitalOut,
+    // true when scraper is up (solenoid low)
+    pub scraper_up: bool,
     pub hood: AdiDigitalOut,
     pub wings: AdiDigitalOut,
     pub block_park: AdiDigitalOut,
@@ -271,7 +273,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let _ = args.perpendicular_wheel.reset_position();
         let initial_pose = args.config.initial_pose;
         let odometry = Odometry::new(initial_pose, args.config.tw_config);
-        let mcl = Mcl::new(initial_pose);
+        // initial variance: 2 inches for X/Y, 5 degrees for theta
+        let initial_variance = (2.0, 2.0, (5.0_f32).to_radians());
+        let mcl = Mcl::new(initial_pose, initial_variance);
         let motor_free_rpm = match args.left_motors[0].gearset() {
             Ok(Gearset::Blue) => 600.0,
             Ok(Gearset::Green) => 200.0,
@@ -279,6 +283,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             Err(_) => 600.0,
         };
         let _ = args.scraper.set_low();
+        // scraper is up when low
         let _ = args.hood.set_high();
         let _ = args.colour_sort.set_low();
         let _ = args.wings.set_low();
@@ -313,6 +318,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             outtake_middle_jam_reverse_until: None,
             outtake_middle_initial_reverse_until: None,
             scraper: args.scraper,
+            scraper_up: true,
             hood: args.hood,
             wings: args.wings,
             block_park: args.block_park,
@@ -363,7 +369,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
 
         let mut beams: alloc::vec::Vec<Beam> = alloc::vec::Vec::with_capacity(4);
-        if let Ok(o) = self.dist_front.object()
+        // ignore front distance when scraper is up (low)
+        if !self.scraper_up
+            && let Ok(o) = self.dist_front.object()
             && let Some(obj) = o
         {
             let inches = (obj.distance as f64) / 25.4;
@@ -416,6 +424,73 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     #[inline]
     pub fn mcl_pose(&self) -> Pose {
         self.last_mcl_pose
+    }
+
+    pub fn reset_xy(&mut self) {
+        let pose = self.odometry.pose();
+        let heading = pose.heading;
+
+        let mut x_sum = 0.0;
+        let mut x_count = 0;
+        let mut y_sum = 0.0;
+        let mut y_count = 0;
+
+        let mut process = |dist: f64, offset_x: f64, offset_y: f64, angle_offset: f64| {
+            let sensor_heading = normalize_angle(heading + angle_offset);
+            let h_deg = sensor_heading.to_degrees();
+
+            if h_deg.abs() < 20.0 {
+                let term = offset_x * heading.cos() - offset_y * heading.sin()
+                    + dist * sensor_heading.cos();
+                x_sum += 72.0 - term;
+                x_count += 1;
+            }
+            else if (h_deg.abs() - 180.0).abs() < 20.0 {
+                let term = offset_x * heading.cos() - offset_y * heading.sin()
+                    + dist * sensor_heading.cos();
+                x_sum += -72.0 - term;
+                x_count += 1;
+            }
+            else if (h_deg - 90.0).abs() < 20.0 {
+                let term = offset_x * heading.sin() + offset_y * heading.cos()
+                    + dist * sensor_heading.sin();
+                y_sum += 72.0 - term;
+                y_count += 1;
+            }
+            else if (h_deg + 90.0).abs() < 20.0 {
+                let term = offset_x * heading.sin() + offset_y * heading.cos()
+                    + dist * sensor_heading.sin();
+                y_sum += -72.0 - term;
+                y_count += 1;
+            }
+        };
+
+        if !self.scraper_up {
+            if let Ok(Some(obj)) = self.dist_front.object() {
+                process(obj.distance as f64 / 25.4, 3.25, 5.25, 0.0);
+            }
+        }
+        if let Ok(Some(obj)) = self.dist_right.object() {
+            process(obj.distance as f64 / 25.4, 5.5, 1.625, -PI / 2.0);
+        }
+        if let Ok(Some(obj)) = self.dist_back.object() {
+            process(obj.distance as f64 / 25.4, -5.0, -1.25, PI);
+        }
+        if let Ok(Some(obj)) = self.dist_left.object() {
+            process(obj.distance as f64 / 25.4, -5.5, 1.625, PI / 2.0);
+        }
+
+        let mut new_pose = pose;
+        if x_count > 0 {
+            new_pose.x = x_sum / x_count as f64;
+        }
+        if y_count > 0 {
+            new_pose.y = y_sum / y_count as f64;
+        }
+
+        if x_count > 0 || y_count > 0 {
+            self.set_pose(new_pose);
+        }
     }
 
     pub fn apply_trigger_actions(&mut self, actions: &[TriggerAction]) {
@@ -503,6 +578,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.alt_colour_last_enemy = false;
                 }
             }
+            TriggerAction::ResetXY => {
+                self.reset_xy();
+            }
         }
     }
 
@@ -511,8 +589,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             PneumaticTarget::Scraper => {
                 if state {
                     let _ = self.scraper.set_high();
+                    self.scraper_up = false;
                 } else {
                     let _ = self.scraper.set_low();
+                    self.scraper_up = true;
                 }
             }
             PneumaticTarget::Hood => {
@@ -552,6 +632,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         match target {
             PneumaticTarget::Scraper => {
                 let _ = self.scraper.toggle();
+                self.scraper_up = !self.scraper_up;
             }
             PneumaticTarget::Hood => {
                 let _ = self.hood.toggle();
@@ -659,7 +740,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
     pub fn set_pose(&mut self, pose: Pose) {
         self.odometry.reset(pose);
-        self.mcl = Mcl::new(pose);
+        // when resetting pose manually, we assume high confidence, so small variance
+        let variance = (1.0, 1.0, (2.0_f32).to_radians());
+        self.mcl = Mcl::new(pose, variance);
         self.last_mcl_pose = pose;
         let _ = self.imu.set_rotation(-pose.heading.to_degrees());
         self.update_diagnostics();

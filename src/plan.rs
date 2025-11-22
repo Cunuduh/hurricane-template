@@ -28,7 +28,7 @@ impl Robot {
                 Action::DriveCurve(ref points) => {
                     println!("Goal: DriveCurve to {:?}", points.last().map(|(p, _)| p));
                     self.chassis
-                        .drive_spline(points, 32, 0.005, 0.75)
+                        .drive_spline(points, 1.0, 5.0, 0.70)
                         .await;
                 }
                 Action::DrivePtp(ref points) => {
@@ -48,7 +48,7 @@ impl Robot {
                 Action::TurnToPoint(pose, settings) => {
                     println!("Goal: TurnToPoint ({:.2}, {:.2})", pose.x, pose.y);
                     self.chassis
-                        .turn_to_point(pose.x, pose.y, settings.max_voltage)
+                        .turn_to_point(pose.x, pose.y, settings.max_voltage, settings.is_reversed)
                         .await;
                 }
                 Action::TurnToAngle(angle, settings) => {

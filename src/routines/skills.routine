@@ -1,29 +1,79 @@
-set_pose (-48.14, -14.945, -90.0)
+set_pose (-48.14, -14.945, 0.0)
+trigger_now "intake"
+
+drive_curve
+    point (-30.0, -14.945) max_voltage=6 reverse=false
+    point (-14.0, -28.0, 0.0) max_voltage=6 reverse=false
+drive_to (-42.0, -24.0) max_voltage=6 reverse=true
 trigger_now "intake"
 trigger_now "scraper_down"
-
-drive_curve
-    point (-48.0, -48.0) max_voltage=6 reverse=false
-    point (-57.5, -48.0, -180.0) max_voltage=6 reverse=false
+drive_ptp
+    point (-42.0, -44.0) max_voltage=6 reverse=false
+    point (-58.5, -45.0) max_voltage=7 reverse=false
 drive_for 1500 max_voltage=3 reverse=false
 
+drive_straight 6.0 max_voltage=3 reverse=true
+trigger_now "scraper_up"
+turn_to_point (-52.0, -59.5) max_voltage=6 reverse=false
+drive_to (-52.0, -59.5) max_voltage=6 reverse=false
+turn_to_angle -3.0 max_voltage=6 reverse=false
+trigger_now "intake_stop"
 drive_curve
-    point (-36.0, -60.0) max_voltage=6 reverse=true
-    point (0.0, -60.0) max_voltage=9 reverse=true
-    point (36.0, -60.0) max_voltage=9 reverse=true
-    point (48.0, -48.0) max_voltage=6 reverse=true
-
-turn_to_angle 0.0 max_voltage=6 reverse=false
-drive_to (28.0, -48.0) max_voltage=7 reverse=true
+    point (0.0, -61.0, 0.0) max_voltage=7 reverse=false
+    point (36.0, -60.0, 0.0) max_voltage=6 reverse=false
+    point (48.0, -46.0, 90.0) max_voltage=6 reverse=false
+drive_to (24.0, -46.0) max_voltage=6 reverse=true
 trigger_now "outtake"
-wait 2000
+wait 3000
+drive_for 100 max_voltage=3 reverse=false
 trigger_now "intake_stop"
 
 trigger_now "intake"
-drive_to (57.5, -48.0) max_voltage=6 reverse=false
+trigger_now "scraper_down"
+drive_to (57.5, -46.0) max_voltage=6 reverse=false
 drive_for 1500 max_voltage=3 reverse=false
 
-drive_to (28.0, -48.0) max_voltage=7 reverse=true
+drive_to (24.0, -46.0) max_voltage=6 reverse=true
 trigger_now "outtake"
-wait 2000
+wait 3000
+drive_straight 6.0 max_voltage=3 reverse=false
 trigger_now "intake_stop"
+
+trigger_now "intake"
+drive_curve
+    point (36.0, 0.0) max_voltage=8 reverse=false
+    point (42.0, 24.0, 90.0) max_voltage=6 reverse=false
+    point (42.0, 51.0, 90.0) max_voltage=6 reverse=false
+turn_to_angle 0.0 max_voltage=6 reverse=false
+drive_straight 17.0 max_voltage=6 reverse=false
+drive_for 1500 max_voltage=3 reverse=false
+
+drive_straight 6.0 max_voltage=3 reverse=true
+trigger_now "scraper_up"
+turn_to_point (52.0, 62.0) max_voltage=6 reverse=false
+drive_to (52.0, 62.0) max_voltage=6 reverse=false
+turn_to_angle 165.0 max_voltage=6 reverse=false
+trigger_now "intake_stop"
+drive_curve
+    point (0.0, 66.0, 180.0) max_voltage=7 reverse=false
+    point (-36.0, 64.0, 180.0) max_voltage=6 reverse=false
+drive_ptp
+    point (-48.0, 51.0) max_voltage=6 reverse=false
+    point (-24.0, 51.0) max_voltage=6 reverse=true
+trigger_now "outtake"
+wait 3000
+drive_for 100 max_voltage=3 reverse=false
+trigger_now "intake_stop"
+trigger_now "intake"
+trigger_now "scraper_down"
+drive_to (-63.0, 51.0) max_voltage=6 reverse=false
+drive_for 1500 max_voltage=3 reverse=false
+drive_to (-24.0, 51.0) max_voltage=9 reverse=true
+trigger_now "outtake"
+wait 1500
+drive_straight 6.0 max_voltage=6 reverse=false
+trigger_now "intake_stop"
+turn_to_point (-65.0, 0.0, -90.0) max_voltage=6 reverse=false
+trigger_now "block_park_toggle"
+trigger_now "scraper_up"
+drive_for 2000 max_voltage=9 reverse=false

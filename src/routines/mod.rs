@@ -53,7 +53,11 @@ fn map_pose(p: IRPose, is_red: bool) -> Pose {
     let pose = if let Some(h) = p.heading {
         Pose::with_heading(p.x, p.y, h.to_radians())
     } else {
-        Pose::new(p.x, p.y)
+        Pose {
+            x: p.x,
+            y: p.y,
+            heading: f64::NAN,
+        }
     };
     
     if is_red {

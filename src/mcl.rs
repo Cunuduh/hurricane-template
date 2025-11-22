@@ -15,13 +15,13 @@ use vexide::{io::println, prelude::Float};
 
 use crate::odometry::Pose;
 
-const N: usize = 256;
+const N: usize = 384;
 const INV_N: f32 = (N as f32).recip();
 const GAUSSIAN_STDDEV: f32 = 3.5; // inches
 const GAUSSIAN_FACTOR: f32 = 1.0;
 const Z_HIT: f32 = 0.9;
 const Z_RAND: f32 = 0.1;
-const XY_NOISE: f32 = 0.1; // inches per update step
+const MOTION_NOISE_ALPHA: f32 = 0.05; // 5% error per inch traveled
 const REINIT_SPREAD: f32 = 8.0;
 const UNIFORM_PARTICLE_RATIO: f32 = 0.2;
 const FIELD_HALF: f32 = 72.0; // +/- 72 inches for VRC field
@@ -30,6 +30,9 @@ const MIN_BEAMS_FOR_UPDATE: usize = 2;
 const MAX_DIST_SINCE_UPDATE: f64 = 2.0; // inches
 const DYN_STDDEV_SCALE: f32 = 0.05; // extra stddev per inch of measured distance
 const RESAMPLE_JITTER: f32 = 0.05; // small uniform jitter after resample
+
+const ALPHA_SLOW: f32 = 0.001;
+const ALPHA_FAST: f32 = 0.1;
 
 const SIMD_WIDTH: usize = 4;
 
@@ -103,15 +106,18 @@ struct Particles {
 }
 
 impl Particles {
-    fn new(initial_pose: Pose, n: usize) -> Self {
+    fn new(initial_pose: Pose, n: usize, initial_variance: (f32, f32, f32), rng: &mut SystemRng) -> Self {
         let mut x = Vec::with_capacity(n);
         let mut y = Vec::with_capacity(n);
         let mut theta = Vec::with_capacity(n);
         let mut weight = Vec::with_capacity(n);
         for _ in 0..n {
-            x.push(initial_pose.x as f32);
-            y.push(initial_pose.y as f32);
-            theta.push(initial_pose.heading as f32);
+            let nx = Self::gaussian_sample(rng, initial_variance.0);
+            let ny = Self::gaussian_sample(rng, initial_variance.1);
+            let nt = Self::gaussian_sample(rng, initial_variance.2);
+            x.push(initial_pose.x as f32 + nx);
+            y.push(initial_pose.y as f32 + ny);
+            theta.push(initial_pose.heading as f32 + nt);
             weight.push(-1.0_f32);
         }
         Self {
@@ -163,19 +169,23 @@ impl Particles {
         self.x.is_empty()
     }
 
-    fn update_delta_noise(
+    fn update_motion(
         &mut self,
         dx: f32,
         dy: f32,
         imu_heading: f32,
         rng: &mut SystemRng,
-        xy_noise: f32,
     ) {
+        let dist = dx.hypot(dy);
+        if dist < 1e-4 {
+            return;
+        }
+        let stddev = MOTION_NOISE_ALPHA * dist;
         for i in 0..self.len() {
-            let nx = (next_f32(rng) * 2.0_f32) - 1.0_f32;
-            let ny = (next_f32(rng) * 2.0_f32) - 1.0_f32;
-            self.x[i] += dx + xy_noise * nx;
-            self.y[i] += dy + xy_noise * ny;
+            let nx = Self::gaussian_sample(rng, stddev);
+            let ny = Self::gaussian_sample(rng, stddev);
+            self.x[i] += dx + nx;
+            self.y[i] += dy + ny;
             self.theta[i] = imu_heading;
         }
     }
@@ -218,6 +228,17 @@ impl Particles {
         let z = x / stddev;
         let denom = stddev * (2.0_f32 * PI).sqrt();
         factor * (-0.5 * z * z).exp() / denom
+    }
+
+    fn gaussian_sample(rng: &mut SystemRng, stddev: f32) -> f32 {
+        if stddev <= 0.0 {
+            return 0.0;
+        }
+        // Box-Muller transform
+        let u1 = next_f32(rng);
+        let u2 = next_f32(rng);
+        let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
+        z0 * stddev
     }
 
     fn update_weight(&mut self, beams: &[Beam], field_half: f32, stddev: f32, factor: f32) {
@@ -281,11 +302,14 @@ pub struct Mcl {
     last_valid_pose: Pose,
     rng: SystemRng,
     dist_since_update: f64,
+    w_slow: f32,
+    w_fast: f32,
 }
 // based on https://www.aadishv.dev/mcl/, but I decided IMU headings are good enough to not need to estimate them
 impl Mcl {
-    pub fn new(initial_pose: Pose) -> Self {
-        let particles = Particles::new(initial_pose, N);
+    pub fn new(initial_pose: Pose, initial_variance: (f32, f32, f32)) -> Self {
+        let mut rng = SystemRng::new();
+        let particles = Particles::new(initial_pose, N, initial_variance, &mut rng);
         let resampled_particles = Particles::with_capacity(N);
         let weight_buffer = Vec::with_capacity(N);
         let cumulative_weights = Vec::with_capacity(N);
@@ -296,8 +320,10 @@ impl Mcl {
             cumulative_weights,
             average_pose: initial_pose,
             last_valid_pose: initial_pose,
-            rng: SystemRng::new(),
+            rng,
             dist_since_update: 0.0,
+            w_slow: 0.0,
+            w_fast: 0.0,
         }
     }
 
@@ -322,7 +348,7 @@ impl Mcl {
         let dx = delta_xy.0 as f32;
         let dy = delta_xy.1 as f32;
         self.particles
-            .update_delta_noise(dx, dy, imu_heading as f32, &mut self.rng, XY_NOISE);
+            .update_motion(dx, dy, imu_heading as f32, &mut self.rng);
     }
 
     fn clamp_weights(&mut self) -> f32 {
@@ -352,6 +378,20 @@ impl Mcl {
             );
             return;
         }
+
+        // Augmented MCL: update slow and fast averages
+        let avg_weight = total_weight * INV_N;
+        if self.w_slow == 0.0 {
+            self.w_slow = avg_weight;
+        } else {
+            self.w_slow += ALPHA_SLOW * (avg_weight - self.w_slow);
+        }
+        if self.w_fast == 0.0 {
+            self.w_fast = avg_weight;
+        } else {
+            self.w_fast += ALPHA_FAST * (avg_weight - self.w_fast);
+        }
+
         if total_weight.is_finite() {
             self.last_valid_pose = self.average_pose;
         }
@@ -365,6 +405,26 @@ impl Mcl {
         let mut i = 0;
         // stochastic universal sampling
         for j in 0..N {
+            // Augmented MCL: random injection
+            let random_prob = (1.0 - self.w_fast / self.w_slow).max(0.0);
+            if next_f32(&mut self.rng) < random_prob {
+                // Inject random particle
+                let rx = (next_f32(&mut self.rng) * 2.0 - 1.0) * FIELD_HALF;
+                let ry = (next_f32(&mut self.rng) * 2.0 - 1.0) * FIELD_HALF;
+                let rt = (next_f32(&mut self.rng) * 2.0 - 1.0) * PI;
+                
+                // We need to push a new particle. Since resampled_particles is just a struct of Vecs,
+                // we can't easily "push" a new struct. We have to push components.
+                // But wait, push_copy_from copies from `particles`.
+                // We need a way to push a raw particle.
+                // Let's add a helper or just push directly.
+                self.resampled_particles.x.push(rx);
+                self.resampled_particles.y.push(ry);
+                self.resampled_particles.theta.push(rt);
+                self.resampled_particles.weight.push(INV_N);
+                continue;
+            }
+
             let target = (u0 + (j as f32) * INV_N) * total_weight;
             while i + 1 < self.cumulative_weights.len() && self.cumulative_weights[i] < target {
                 i += 1;

@@ -1,0 +1,25 @@
+set_pose (-48.14, 14.945, 0.0)
+trigger_now "alt_colour_sort_enable"
+trigger_now "intake"
+drive_curve
+    point (-48.14, 14.945) max_voltage=7 reverse=false
+    point (-30.0, 14.945) max_voltage=6 reverse=false
+    point (-17.5, 24.0) max_voltage=6 reverse=false
+drive_to (-25.5, 24.0) max_voltage=7 reverse=true
+turn_to_angle 131.0 max_voltage=6 reverse=false
+drive_straight 19.25 max_voltage=6 reverse=true
+trigger_now "outtake_middle"
+wait 2000
+trigger_now "intake_stop"
+drive_straight 19.0 max_voltage=6 reverse=false
+trigger_now "scraper_down"
+trigger_now "intake"
+drive_ptp
+    point (-49.0, 48.0) max_voltage=6 reverse=false
+    point (-57.5, 49.5) max_voltage=7 reverse=false
+drive_for 700 max_voltage=3 reverse=false
+drive_to (-28.0, 49.5) max_voltage=9 reverse=true
+trigger_now "scraper_up"
+trigger_now "outtake"
+wait 2000
+trigger_now "intake_stop"

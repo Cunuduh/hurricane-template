@@ -48,8 +48,8 @@ pub fn interpolate_linear(
 
 pub fn interpolate_curve(
     points: &[(Pose, PoseSettings)],
-    steps: usize,
-) -> Vec<(Pose, PoseSettings)> {
+    step_size: f64,
+) -> Vec<(Pose, PoseSettings, usize)> {
     // mixed catmull-rom/hermite: use centripetal catmull-rom tangents by default, but if a waypoint
     // has a finite heading, override the tangent direction there with that heading (magnitude preserved)
     const ALPHA: f64 = 0.5;
@@ -58,7 +58,7 @@ pub fn interpolate_curve(
         return Vec::new();
     }
     if n == 1 {
-        return vec![(points[0].0, points[0].1)];
+        return vec![(points[0].0, points[0].1, 0)];
     }
 
     // parameterization t_i using centripetal distances
@@ -108,17 +108,20 @@ pub fn interpolate_curve(
     }
 
     // sample each segment using cubic hermite with s in [0,1]
-    let steps = steps.max(1);
-    let mut result = Vec::with_capacity((n - 1) * steps + 1);
+    let step_size = step_size.max(0.1);
+    let mut result = Vec::new();
 
     for i in 0..(n - 1) {
         let p0 = points[i].0;
         let p1 = points[i + 1].0;
-        let settings = points[i].1;
         let dt = (t[i + 1] - t[i]).max(1e-7);
         // scale tangents to segment parameter s
         let m0 = (m[i].0 * dt, m[i].1 * dt);
         let m1 = (m[i + 1].0 * dt, m[i + 1].1 * dt);
+
+        // estimate segment length using chord length
+        let segment_dist = p0.distance(&p1);
+        let steps = (segment_dist / step_size).ceil().max(1.0) as usize;
 
         for step in 0..steps {
             let s = step as f64 / steps as f64;
@@ -145,7 +148,15 @@ pub fn interpolate_curve(
             let heading = dy.atan2(dx);
 
             let pose = Pose { x, y, heading };
-            result.push((pose, settings));
+            
+            // interpolate voltage
+            let v0 = points[i].1.max_voltage;
+            let v1 = points[i + 1].1.max_voltage;
+            let v_interp = v0 + (v1 - v0) * s;
+            let mut settings = points[i].1;
+            settings.max_voltage = v_interp;
+
+            result.push((pose, settings, i));
         }
     }
 
@@ -160,7 +171,7 @@ pub fn interpolate_curve(
     } else {
         0.0
     };
-    result.push((Pose { x: last.x, y: last.y, heading: last_heading }, points[n - 1].1));
+    result.push((Pose { x: last.x, y: last.y, heading: last_heading }, points[n - 1].1, n - 1));
 
     result
 }
