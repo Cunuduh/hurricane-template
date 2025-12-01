@@ -116,16 +116,14 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
     let v_max = (rpm / 60.0) * w_circ;
     let a_max = v_max / chassis.config.t_accel_ramsete;
     let d_max = v_max / chassis.config.t_decel_ramsete;
-    let a_cmax = 0.67 * 39.37;
+    let centripetal_limit = chassis.config.centripetal_accel_limit;
     // first compute the "speed limit" of every point given the curvature
     for p in profile_points.iter_mut() {
         let point_max_velocity = (p.max_voltage / chassis.config.max_volts) * v_max;
         let mut v = point_max_velocity;
         let curvature = p.curvature.abs();
         if curvature > 1e-6 {
-            // constrain velocity based on centripetal acceleration limit of robot on the foam tiles so it doesn't tip over while turning
-            let v_c = (a_cmax / curvature).sqrt();
-            // constrain velocity based on max speed the outer wheel can go given track width
+            let v_c = (centripetal_limit / curvature).sqrt();
             let v_t = v_max / (1.0 + (curvature * chassis.config.track_width / 2.0));
             v = v.min(v_c).min(v_t);
         }

@@ -74,6 +74,9 @@ pub struct ChassisAutonConfig {
     pub t_decel_drive: f64,
     pub t_decel_turn: f64,
 
+    pub centripetal_accel_limit: f64,
+    pub velocity_exit_threshold: f64,
+
     pub tw_config: TrackingWheelConfig,
 }
 
@@ -177,6 +180,9 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub mcl: Mcl,
     pub last_mcl_pose: Pose,
     pub team_is_red: bool,
+    pub prev_pose: Pose,
+    pub last_update_time: Instant,
+    pub pose_velocity: f64,
     // block park macro state
     pub block_park_macro_active: bool,
     pub block_park_macro_detected: bool,
@@ -350,6 +356,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             last_mcl_pose: initial_pose,
             // read initial value from UI if present, default to red
             team_is_red: initial_team_is_red,
+            prev_pose: initial_pose,
+            last_update_time: Instant::now(),
+            pose_velocity: 0.0,
             block_park_macro_active: false,
             block_park_macro_detected: false,
             block_park_macro_post_delay_until: None,
@@ -368,6 +377,15 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let curr_pose = self.odometry.pose();
         let dx = curr_pose.x - prev_pose.x;
         let dy = curr_pose.y - prev_pose.y;
+
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_update_time).as_secs_f64();
+        if dt > 1e-6 {
+            let dist = dx.hypot(dy);
+            self.pose_velocity = dist / dt;
+        }
+        self.prev_pose = prev_pose;
+        self.last_update_time = now;
 
         if !USE_MCL_LOCALIZATION {
             self.last_mcl_pose = curr_pose;
@@ -658,14 +676,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
     }
 
-    pub fn check_stall(&mut self) -> bool {
+    pub fn check_stall(&mut self, fast: bool) -> bool {
         let mut total_current = 0.0;
-        let mut total_velocity = 0.0;
         let mut num_motors = 0;
 
         for motor in self.left_motors.iter().chain(self.right_motors.iter()) {
             total_current += motor.current().unwrap_or_default().abs();
-            total_velocity += motor.velocity().unwrap_or_default().abs();
             num_motors += 1;
         }
 
@@ -674,15 +690,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         } else {
             0.0
         };
-        let avg_velocity = if num_motors > 0 {
-            total_velocity / num_motors as f64
-        } else {
-            0.0
-        };
 
-        if avg_current >= self.config.stall_current_threshold
-            && avg_velocity <= self.config.stall_velocity_threshold
-        {
+        let stalled = avg_current >= self.config.stall_current_threshold
+            && self.pose_velocity <= self.config.stall_velocity_threshold;
+
+        if stalled {
+            if fast {
+                return true;
+            }
             if self.stall_timer.is_none() {
                 self.stall_timer = Some(Instant::now());
             }

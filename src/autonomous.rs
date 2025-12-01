@@ -8,7 +8,7 @@ use vexide::{prelude::*, time::Instant};
 
 use crate::{
     chassis::PoseSettings,
-    motion_controller::{MotionProfile2DPoint, compute_motion_profile, TrapezoidalProfile1D},
+    motion_profile::{MotionProfile2DPoint, compute_motion_profile, TrapezoidalProfile1D},
     odometry::Pose,
     utils::{normalize_angle, path::interpolate_curve},
 };
@@ -303,7 +303,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             let vl = target_vl.clamp(-self.config.max_volts, self.config.max_volts);
             let vr = target_vr.clamp(-self.config.max_volts, self.config.max_volts);
-            if vl.abs().max(vr.abs()) >= 3.0 && self.check_stall() {
+            if vl.abs().max(vr.abs()) >= 3.0 && self.check_stall(false) {
                 println!("ramsete: stall detected");
                 break;
             }
@@ -337,7 +337,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         self.update_state();
         let start_pose = self.odometry.pose();
-        let initial_heading = start_pose.heading;
+        let target_heading = (target.y - start_pose.y).atan2(target.x - start_pose.x);
 
         let drive_direction = if settings.is_reversed { -1.0 } else { 1.0 };
 
@@ -347,7 +347,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let (t_dir_x, t_dir_y) = if total_dist > 1e-6 {
             (dx / total_dist, dy / total_dist)
         } else {
-            (initial_heading.cos(), initial_heading.sin())
+            (target_heading.cos(), target_heading.sin())
         };
         if total_dist < self.config.small_drive_exit_error {
             return;
@@ -399,11 +399,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             if error_abs <= self.config.small_drive_exit_error {
                 big_timer = None;
+                let velocity_satisfied = self.pose_velocity < self.config.velocity_exit_threshold;
                 if small_timer.is_none() {
                     small_timer = Some(Instant::now());
                 }
                 if let Some(t) = small_timer
-                    && t.elapsed() >= self.config.small_drive_settle_time
+                    && (velocity_satisfied || t.elapsed() >= self.config.small_drive_settle_time)
                 {
                     println!("drive_linear: done (small error)");
                     break;
@@ -429,13 +430,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 }
             }
 
-            if self.check_stall() {
+            if self.check_stall(settings.fast) {
                 println!("drive_linear: stall detected");
                 break;
             }
 
-            // try to maintain the initial heading for straight-line driving with small corrections
-            let heading_error = normalize_angle(initial_heading - pose.heading);
+            let heading_error = normalize_angle(target_heading - pose.heading);
             let heading_correction = heading_pid
                 .next(heading_error, dt)
                 .clamp(-settings.max_voltage, settings.max_voltage);
@@ -608,7 +608,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
             e_prev = Some(e);
 
-            if self.check_stall() {
+            if self.check_stall(fast) {
                 println!("turn_to_angle: stall detected");
                 break;
             }

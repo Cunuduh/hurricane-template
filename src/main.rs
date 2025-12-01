@@ -27,7 +27,7 @@ mod autonomous;
 mod chassis;
 mod driver_control;
 mod mcl;
-mod motion_controller;
+mod motion_profile;
 mod odometry;
 mod pid;
 mod plan;
@@ -388,6 +388,9 @@ impl Robot {
             t_decel_ramsete: 1.0,
             t_decel_drive: 1.0,
             t_decel_turn: 1.0,
+
+            centripetal_accel_limit: 0.67 * 39.37,
+            velocity_exit_threshold: 1.0,
 
             tw_config,
         };
