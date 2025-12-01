@@ -3,20 +3,20 @@ trigger_now "alt_colour_sort_enable"
 trigger_now "intake"
 
 drive_curve
-    point (-30.0, 18.0) max_voltage=6 reverse=false
-    point (-16.0, 24.0, 0.0) max_voltage=6 reverse=false
-    point (-48.0, 24.0) max_voltage=6 reverse=true
+    point (-30.0, 18.0)
+    point (-16.0, 24.0, 0.0)
+drive_to (-48.0, 24.0) reverse
 trigger_now "scraper_down"
-drive_curve
-    point (-48.0, 48.0, 90.0) max_voltage=6 reverse=false
-    point (-56.0, 48.0, 180.0) max_voltage=6 reverse=false
-    point (-61.0, 48.0, 180.0) max_voltage=6 reverse=false
-drive_for 700 max_voltage=3 reverse=false
+drive_ptp
+    point (-48.0, 48.0)
+    point (-61.0, 48.0)
+drive_for 700 max_voltage=3
 
-drive_to (-28.0, 48.0) max_voltage=6 reverse=true
+turn_to_angle 180.0
+drive_straight 33.0 reverse
 trigger_now "intake_stop"
 trigger_now "outtake"
 wait 2500
 trigger_now "intake_stop"
 
-drive_straight 3.0 max_voltage=3 reverse=false
+drive_straight 3.0 max_voltage=3

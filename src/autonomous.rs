@@ -8,7 +8,7 @@ use vexide::{prelude::*, time::Instant};
 
 use crate::{
     chassis::PoseSettings,
-    motion_controller::{ProfilePoint, compute_motion_profile, TrapezoidalProfile},
+    motion_controller::{MotionProfile2DPoint, compute_motion_profile, TrapezoidalProfile1D},
     odometry::Pose,
     utils::{normalize_angle, path::interpolate_curve},
 };
@@ -25,6 +25,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         step_size: f64,
         b: f64,
         zeta: f64,
+        fast: bool,
     ) {
         // rebase path to start at current pose by prepending current pose as first waypoint
         // inherit settings from the original first waypoint if present
@@ -42,17 +43,18 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let total_time = initialized_profile.total_time;
         // 1550.0 is approx 39.37^2, converting b (m^-2) to in^-2
         let b_inches = b / 1550.0;
-        self.execute_ramsete_profile(profile, times, total_time, b_inches, zeta)
+        self.execute_ramsete_profile(profile, times, total_time, b_inches, zeta, fast)
             .await;
     }
 
     async fn execute_ramsete_profile(
         &mut self,
-        profile: Vec<ProfilePoint>,
+        profile: Vec<MotionProfile2DPoint>,
         times: Vec<f64>,
         total_time: f64,
         b: f64,
         zeta: f64,
+        fast: bool,
     ) {
         let m = profile.len();
         if m < 2 {
@@ -73,15 +75,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         let mut last_wp = None;
 
-        let mut vr_prev: Option<f64> = Some(profile[0].velocity);
-        let mut wr_prev: Option<f64> = Some(profile[0].angular_velocity);
         let mut last_time = Instant::now();
         let start_time = last_time;
         let mut seg_i = 0;
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
         let safety_timeout =
-            Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(400));
+            Duration::from_millis(((total_time * 1000.0) as u64).saturating_add(100));
 
         let mut settle_drive_pid = self.config.drive_pid;
         let mut settle_turn_pid = self.config.turn_pid;
@@ -132,6 +132,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 let big_position = dist_err <= self.config.big_drive_exit_error;
                 let big_heading = heading_err <= self.config.big_turn_exit_error;
                 if big_position && big_heading {
+                    if fast {
+                        println!("ramsete: done (fast)");
+                        break;
+                    }
                     if big_timer.is_none() {
                         big_timer = Some(Instant::now());
                     }
@@ -148,7 +152,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             let mut target_vl;
             let mut target_vr;
-
+            // fall back to PID settling at the end of the profile
             if elapsed >= total_time {
                 let final_pose = profile.last().unwrap().point;
                 let current = self.mcl_pose();
@@ -244,19 +248,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                 let v = v_d * e_theta.cos() + k * e_x;
                 let w = w_r + k * e_theta + b * v_d * sinc(e_theta) * e_y;
 
-                let a_vr = if let Some(prev) = vr_prev {
-                    (v_d - prev) / dt_loop
-                } else {
-                    0.0
-                };
-                vr_prev = Some(v_d);
+                let a0 = profile[i].acceleration;
+                let a1 = profile[i + 1].acceleration;
+                let a_profile = a0 + (a1 - a0) * tau;
+                let a_vr = a_profile * reversed;
 
-                let a_wr = if let Some(prev) = wr_prev {
-                    (w_r - prev) / dt_loop
-                } else {
-                    0.0
-                };
-                wr_prev = Some(w_r);
+                let alpha0 = profile[i].angular_acceleration;
+                let alpha1 = profile[i + 1].angular_acceleration;
+                let a_wr = (alpha0 + (alpha1 - alpha0) * tau) * reversed;
 
                 let ks = self.config.ff_ks;
                 let kv_lin = self.config.ff_kv;
@@ -320,7 +319,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             .iter_mut()
             .chain(self.right_motors.iter_mut())
         {
-            let _ = m.brake(BrakeMode::Hold);
+            let _ = m.brake(BrakeMode::Brake);
         }
     }
 
@@ -360,11 +359,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             * (self.config.wheel_diameter * PI);
         
         let max_v = max_linear_vel * (settings.max_voltage / self.config.max_volts);
-        let max_a = max_linear_vel / self.config.t_accel;
-        let profile = TrapezoidalProfile::new(total_dist, max_v, max_a);
+        let max_a = max_linear_vel / self.config.t_accel_drive;
+        let max_d = max_linear_vel / self.config.t_decel_drive;
+        let profile = TrapezoidalProfile1D::new(total_dist, max_v, max_a, max_d);
         
         let safety_timeout =
-            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(250));
+            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(50));
 
         let mut small_timer: Option<Instant> = None;
         let mut big_timer: Option<Instant> = None;
@@ -411,6 +411,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             } else {
                 small_timer = None;
                 if error_abs <= self.config.big_drive_exit_error {
+                    if settings.fast {
+                        println!("drive_linear: done (fast)");
+                        break;
+                    }
                     if big_timer.is_none() {
                         big_timer = Some(Instant::now());
                     }
@@ -481,7 +485,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             .iter_mut()
             .chain(self.right_motors.iter_mut())
         {
-            let _ = m.brake(BrakeMode::Hold);
+            let _ = m.brake(BrakeMode::Brake);
         }
     }
 
@@ -501,7 +505,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let turn_v = settings.max_voltage.min(self.config.max_volts).max(1.0);
         let heading_delta = normalize_angle(turn_heading - self.odometry.pose().heading);
         if heading_delta.abs().to_degrees() > self.config.small_turn_exit_error {
-            self.turn_to_angle(turn_heading.to_degrees(), turn_v, false)
+            self.turn_to_angle(turn_heading.to_degrees(), turn_v, false, settings.fast)
                 .await;
         }
 
@@ -521,14 +525,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.drive_linear(&path).await;
     }
 
-    pub async fn turn_to_point(&mut self, x: f64, y: f64, v: f64, reverse: bool) {
+    pub async fn turn_to_point(&mut self, x: f64, y: f64, v: f64, reverse: bool, fast: bool) {
         self.update_state();
         let p = self.mcl_pose();
         let a = (y - p.y).atan2(x - p.x);
-        self.turn_to_angle(a.to_degrees(), v, reverse).await;
+        self.turn_to_angle(a.to_degrees(), v, reverse, fast).await;
     }
 
-    pub async fn turn_to_angle(&mut self, a_deg: f64, v: f64, reverse: bool) {
+    pub async fn turn_to_angle(&mut self, a_deg: f64, v: f64, reverse: bool, fast: bool) {
         let mut pid = self.config.turn_pid;
         pid.reset();
         self.stall_timer = None;
@@ -559,12 +563,13 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let max_angular_vel = 2.0 * max_linear_vel / self.config.track_width;
 
         let max_v = max_angular_vel * (v.min(self.config.max_volts) / self.config.max_volts);
-        let max_a = max_angular_vel / self.config.t_accel;
+        let max_a = max_angular_vel / self.config.t_accel_turn;
+        let max_d = max_angular_vel / self.config.t_decel_turn;
 
-        let profile = TrapezoidalProfile::new(planned_delta, max_v, max_a);
+        let profile = TrapezoidalProfile1D::new(planned_delta, max_v, max_a, max_d);
 
         let safety_timeout =
-            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(250));
+            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(50));
 
         let small_exit_deg = self.config.small_turn_exit_error;
         let big_exit_deg = self.config.big_turn_exit_error;
@@ -623,6 +628,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             } else {
                 ts = None;
                 if e2 <= big_exit_deg {
+                    if fast {
+                        println!("turn_to_angle: done (fast)");
+                        break;
+                    }
                     if tb.is_none() {
                         tb = Some(Instant::now());
                     }
@@ -678,7 +687,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             .iter_mut()
             .chain(self.right_motors.iter_mut())
         {
-            let _ = m.brake(BrakeMode::Hold);
+            let _ = m.brake(BrakeMode::Brake);
         }
     }
 
@@ -700,7 +709,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
             let target_deg = if i.is_multiple_of(2) { 90.0 } else { 270.0 };
 
-            self.turn_to_angle(target_deg, 6.0, false).await;
+            self.turn_to_angle(target_deg, 6.0, false, false).await;
             sleep(Duration::from_millis(250)).await;
 
             let imu_start = 0.0;
@@ -719,8 +728,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let perpendicular_distance = perpendicular_delta * wheel_circumference;
 
             if t_delta.abs() > 1e-6 {
-                parallel_offset_sum += perpendicular_distance / t_delta;
-                perpendicular_offset_sum += parallel_distance / t_delta;
+                parallel_offset_sum += parallel_distance / t_delta;
+                perpendicular_offset_sum += perpendicular_distance / t_delta;
             }
         }
 
@@ -731,7 +740,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         println!("perpendicular offset: {:.3} inches", perpendicular_offset);
     }
 
-    pub async fn drive_straight(&mut self, target_dist: f64, max_voltage: f64, reverse: bool) {
+    pub async fn drive_straight(&mut self, target_dist: f64, max_voltage: f64, reverse: bool, fast: bool) {
         self.update_state();
         let start = self.odometry.pose();
         let effective_reverse = if reverse {
@@ -760,6 +769,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let settings = PoseSettings {
             is_reversed: effective_reverse,
             max_voltage,
+            fast,
         };
         let path: [(Pose, PoseSettings); 2] = [(start_pose, settings), (end_pose, settings)];
         self.drive_linear(&path).await;
@@ -796,7 +806,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             .iter_mut()
             .chain(self.right_motors.iter_mut())
         {
-            let _ = m.brake(BrakeMode::Hold);
+            let _ = m.brake(BrakeMode::Brake);
         }
     }
 }

@@ -14,6 +14,7 @@ struct IRPose {
 struct IRPoseSettings {
     is_reversed: bool,
     max_voltage: f64,
+    fast: bool,
 }
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 enum IRAction {
@@ -40,13 +41,6 @@ struct IRRoutine {
 fn parse_number(s: &str) -> f64 {
     s.trim().parse::<f64>().expect("invalid number")
 }
-fn parse_bool(s: &str) -> bool {
-    match s.trim() {
-        "true" => true,
-        "false" => false,
-        _ => panic!("invalid bool"),
-    }
-}
 fn parse_tuple(s: &str) -> (f64, f64, Option<f64>) {
     let t = s.trim().trim_start_matches('(').trim_end_matches(')');
     let mut parts = t.split(',').map(|p| p.trim());
@@ -59,27 +53,26 @@ fn parse_tuple(s: &str) -> (f64, f64, Option<f64>) {
     (x, y, h)
 }
 
-fn parse_attrs(mut rest: &str) -> IRPoseSettings {
+fn parse_attrs(rest: &str) -> IRPoseSettings {
     let mut settings = IRPoseSettings {
         is_reversed: false,
-        max_voltage: 12.0,
+        max_voltage: 6.0,
+        fast: false,
     };
-    while let Some(idx) = rest.find('=') {
-        let (key_part, value_rest) = rest.split_at(idx);
-        let key = key_part.split_whitespace().last().unwrap_or("");
-        let value_and_more = &value_rest[1..];
-        let end = value_and_more.find(' ');
-        let end_idx = end.unwrap_or(value_and_more.len());
-        let value = &value_and_more[..end_idx];
-        match key {
-            "max_voltage" => settings.max_voltage = parse_number(value),
-            "reverse" => settings.is_reversed = parse_bool(value),
-            _ => {}
+    for token in rest.split_whitespace() {
+        if let Some(idx) = token.find('=') {
+            let key = &token[..idx];
+            let value = &token[idx + 1..];
+            if key == "max_voltage" {
+                settings.max_voltage = parse_number(value);
+            }
+        } else {
+            match token {
+                "fast" => settings.fast = true,
+                "reverse" => settings.is_reversed = true,
+                _ => {}
+            }
         }
-        if end.is_none() {
-            break;
-        }
-        rest = &value_and_more[end_idx + 1..];
     }
     settings
 }

@@ -26,16 +26,18 @@ const USE_MCL_LOCALIZATION: bool = false;
 pub struct PoseSettings {
     pub is_reversed: bool,
     pub max_voltage: f64,
+    pub fast: bool,
 }
 impl Default for PoseSettings {
     fn default() -> Self {
         Self {
             is_reversed: false,
-            max_voltage: 12.0,
+            max_voltage: 6.0,
+            fast: false,
         }
     }
 }
-pub struct ChassisConfig {
+pub struct ChassisAutonConfig {
     pub initial_pose: Pose,
     pub wheel_diameter: f64,
     pub ext_gear_ratio: f64,
@@ -65,7 +67,12 @@ pub struct ChassisConfig {
     pub stall_velocity_threshold: f64,
     pub stall_time: Duration,
 
-    pub t_accel: f64,
+    pub t_accel_ramsete: f64,
+    pub t_accel_drive: f64,
+    pub t_accel_turn: f64,
+    pub t_decel_ramsete: f64,
+    pub t_decel_drive: f64,
+    pub t_decel_turn: f64,
 
     pub tw_config: TrackingWheelConfig,
 }
@@ -127,7 +134,7 @@ pub struct Chassis<const L: usize, const R: usize, const I: usize> {
     pub parallel_wheel: RotationSensor,
     pub perpendicular_wheel: RotationSensor,
     pub intake_motors: [Motor; I],
-    pub config: ChassisConfig,
+    pub config: ChassisAutonConfig,
     pub imu: InertialSensor,
     pub controller: Controller,
     pub odometry: Odometry,
@@ -194,7 +201,7 @@ pub struct ChassisArgs<const L: usize, const R: usize, const I: usize> {
     pub block_park: AdiDigitalOut,
     pub colour_sort: AdiDigitalOut,
     pub controller: Controller,
-    pub config: ChassisConfig,
+    pub auton_config: ChassisAutonConfig,
     pub triggers: &'static [TriggerDefinition],
     pub ui: slint::Weak<VexSelector>,
 }
@@ -258,7 +265,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let _ = args.imu.reset_rotation();
         let _ = args
             .imu
-            .set_rotation(-args.config.initial_pose.heading.to_degrees());
+            .set_rotation(-args.auton_config.initial_pose.heading.to_degrees());
 
         for m in args.left_motors.iter_mut() {
             let _ = m.reset_position();
@@ -271,8 +278,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         }
         let _ = args.parallel_wheel.reset_position();
         let _ = args.perpendicular_wheel.reset_position();
-        let initial_pose = args.config.initial_pose;
-        let odometry = Odometry::new(initial_pose, args.config.tw_config);
+        let initial_pose = args.auton_config.initial_pose;
+        let odometry = Odometry::new(initial_pose, args.auton_config.tw_config);
         // initial variance: 2 inches for X/Y, 5 degrees for theta
         let initial_variance = (2.0, 2.0, (5.0_f32).to_radians());
         let mcl = Mcl::new(initial_pose, initial_variance);
@@ -300,7 +307,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             parallel_wheel: args.parallel_wheel,
             perpendicular_wheel: args.perpendicular_wheel,
             intake_motors: args.intake_motors,
-            config: args.config,
+            config: args.auton_config,
             imu: args.imu,
             controller: args.controller,
             odometry,

@@ -10,19 +10,21 @@ use crate::{
     utils::normalize_angle,
 };
 
-pub struct Profile {
-    pub profile_points: Vec<ProfilePoint>,
+pub struct MotionProfile2D {
+    pub profile_points: Vec<MotionProfile2DPoint>,
     pub times: Vec<f64>,
     pub total_time: f64,
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct ProfilePoint {
+pub struct MotionProfile2DPoint {
     pub point: Pose,
     pub distance: f64,
     pub curvature: f64,
     pub velocity: f64,
+    pub acceleration: f64,
     pub angular_velocity: f64,
+    pub angular_acceleration: f64,
     pub is_reversed: bool,
     pub max_voltage: f64,
     pub waypoint_index: usize,
@@ -32,13 +34,13 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
     chassis: &Chassis<L, R, I>,
     interpolated_path: Vec<(Pose, PoseSettings, usize)>,
     _raw_waypoints: &[(Pose, PoseSettings)],
-) -> Profile {
+) -> MotionProfile2D {
     let path_points = interpolated_path.iter().map(|p| p.0).collect::<Vec<_>>();
     let m = path_points.len();
     let mut profile_points = Vec::with_capacity(m);
 
     if m == 0 {
-        return Profile {
+        return MotionProfile2D {
             profile_points,
             times: Vec::new(),
             total_time: 0.0,
@@ -50,12 +52,14 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
     if interpolated_path[0].1.is_reversed {
         p0.heading = normalize_angle(p0.heading + PI);
     }
-    profile_points.push(ProfilePoint {
+    profile_points.push(MotionProfile2DPoint {
         point: p0,
         distance: 0.0,
         curvature: 0.0,
         velocity: 0.0,
+        acceleration: 0.0,
         angular_velocity: 0.0,
+        angular_acceleration: 0.0,
         is_reversed: interpolated_path[0].1.is_reversed,
         max_voltage: interpolated_path[0].1.max_voltage,
         waypoint_index: interpolated_path[0].2,
@@ -75,19 +79,21 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
             p.heading = normalize_angle(p.heading + PI);
         }
 
-        profile_points.push(ProfilePoint {
+        profile_points.push(MotionProfile2DPoint {
             point: p,
             distance: cum_d,
             curvature: 0.0,
             velocity: 0.0,
+            acceleration: 0.0,
             angular_velocity: 0.0,
+            angular_acceleration: 0.0,
             is_reversed,
             max_voltage,
             waypoint_index,
         });
     }
 
-    // compute curvature as |Δθ|/Δs using centered difference
+    // compute curvature as |Δθ|/Δs using centred difference
     for i in 1..(m - 1) {
         let h_prev = profile_points[i - 1].point.heading;
         let h_next = profile_points[i + 1].point.heading;
@@ -101,12 +107,16 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
             profile_points[i].curvature = profile_points[i - 1].curvature;
         }
     }
-
+    if m > 1 {
+        profile_points[0].curvature = profile_points[1].curvature;
+        profile_points[m - 1].curvature = profile_points[m - 2].curvature;
+    }
     let w_circ = chassis.config.wheel_diameter * PI;
     let rpm = chassis.motor_free_rpm / chassis.config.ext_gear_ratio;
     let v_max = (rpm / 60.0) * w_circ;
-    let a_max = v_max / chassis.config.t_accel;
-    let a_cmax = 0.35 * 39.37;
+    let a_max = v_max / chassis.config.t_accel_ramsete;
+    let d_max = v_max / chassis.config.t_decel_ramsete;
+    let a_cmax = 0.67 * 39.37;
     // first compute the "speed limit" of every point given the curvature
     for p in profile_points.iter_mut() {
         let point_max_velocity = (p.max_voltage / chassis.config.max_volts) * v_max;
@@ -121,25 +131,29 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
         }
         p.velocity = v;
     }
-    // the forward pass to make sure acceleration is realistic given distance between points and our computed speed limit
+    profile_points[0].velocity = 0.0;
+    profile_points[m - 1].velocity = 0.0;
+    
+    // forward pass: enforce acceleration limits
     for i in 0..(m - 1) {
         let d = profile_points[i + 1].distance - profile_points[i].distance;
         if d < 1e-9 {
             profile_points[i + 1].velocity = profile_points[i + 1]
                 .velocity
                 .min(profile_points[i].velocity);
+            profile_points[i + 1].acceleration = 0.0;
             continue;
         }
-        let vf = profile_points[i].velocity.powi(2) + 2.0 * a_max * d;
-        if vf >= 0.0 {
-            profile_points[i + 1].velocity = profile_points[i + 1].velocity.min(vf.sqrt());
-        } else {
-            profile_points[i + 1].velocity = profile_points[i + 1].velocity.min(0.0);
-        }
+        
+        let v_i = profile_points[i].velocity;
+        let v_limit = profile_points[i + 1].velocity;
+        let v_f = (v_i.powi(2) + 2.0 * a_max * d).sqrt().min(v_limit);
+        
+        profile_points[i + 1].velocity = v_f;
+        profile_points[i + 1].acceleration = (v_f.powi(2) - v_i.powi(2)) / (2.0 * d);
     }
-    profile_points[0].velocity = 0.0;
-    profile_points[m - 1].velocity = 0.0;
-    // same logic as forward pass but in reverse for deceleration
+    
+    // backward pass: enforce deceleration limits
     for i in (0..(m - 1)).rev() {
         let d = profile_points[i + 1].distance - profile_points[i].distance;
         if d < 1e-9 {
@@ -148,14 +162,48 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
                 .min(profile_points[i + 1].velocity);
             continue;
         }
-        let vf_old = profile_points[i + 1].velocity.powi(2) + 2.0 * a_max * d;
-        if vf_old >= 0.0 {
-            profile_points[i].velocity = profile_points[i].velocity.min(vf_old.sqrt());
-        } else {
-            profile_points[i].velocity = profile_points[i].velocity.min(0.0);
-        }
+        
+        let v_f = profile_points[i + 1].velocity;
+        let v_limit = profile_points[i].velocity;
+        let v_i = (v_f.powi(2) + 2.0 * d_max * d).sqrt().min(v_limit);
+        
+        profile_points[i].velocity = v_i;
+        profile_points[i].acceleration = (v_f.powi(2) - v_i.powi(2)) / (2.0 * d);
     }
-    // finally, compute the e.t.a. for each point
+    
+    // apply product rule
+    // α = dω/dt = (dv/dt)·κ + v·(dκ/dt)
+    // α = a·κ + v·(dκ/ds)·(ds/dt)
+    // α = a·κ + v²·(dκ/ds)
+    for i in 1..(m - 1) {
+        let k_prev = profile_points[i - 1].curvature;
+        let k_next = profile_points[i + 1].curvature;
+        let d_prev = profile_points[i].distance - profile_points[i - 1].distance;
+        let d_next = profile_points[i + 1].distance - profile_points[i].distance;
+        let ds = d_prev + d_next;
+        
+        let dk_ds = if ds > 1e-9 {
+            (k_next - k_prev) / ds
+        } else {
+            0.0
+        };
+        
+        let v = profile_points[i].velocity;
+        let a = profile_points[i].acceleration;
+        let k = profile_points[i].curvature;
+        
+        profile_points[i].angular_velocity = v * k;
+        profile_points[i].angular_acceleration = a * k + v * v * dk_ds;
+    }
+    
+    profile_points[0].angular_velocity = profile_points[0].velocity * profile_points[0].curvature;
+    profile_points[0].angular_acceleration = 
+        profile_points[0].acceleration * profile_points[0].curvature;
+    
+    profile_points[m - 1].angular_velocity = profile_points[m - 1].velocity * profile_points[m - 1].curvature;
+    profile_points[m - 1].angular_acceleration = 
+        profile_points[m - 1].acceleration * profile_points[m - 1].curvature;
+
     let mut times = Vec::with_capacity(m);
     times.push(0.0);
     for i in 1..m {
@@ -167,47 +215,47 @@ pub fn compute_motion_profile<const L: usize, const R: usize, const I: usize>(
     }
     let total_time = *times.last().unwrap_or(&0.0);
 
-    for p in profile_points.iter_mut() {
-        p.angular_velocity = p.velocity * p.curvature;
-    }
 
-    Profile {
+    MotionProfile2D {
         profile_points,
         times,
         total_time,
     }
 }
 
-pub struct TrapezoidalProfile {
+pub struct TrapezoidalProfile1D {
     pub total_time: f64,
-    pub t1: f64, // end of acceleration
-    pub t2: f64, // end of constant velocity
+    pub t1: f64,
+    pub t2: f64,
     pub distance: f64,
     pub max_v: f64,
     pub max_a: f64,
+    pub max_d: f64,
 }
 
-impl TrapezoidalProfile {
-    pub fn new(distance: f64, max_v: f64, max_a: f64) -> Self {
+impl TrapezoidalProfile1D {
+    pub fn new(distance: f64, max_v: f64, max_a: f64, max_d: f64) -> Self {
         let mut v_peak = max_v;
         let d_accel = 0.5 * v_peak * v_peak / max_a;
-        let d_decel = d_accel;
+        let d_decel = 0.5 * v_peak * v_peak / max_d;
 
         let (t1, t2, total_time);
 
         if d_accel + d_decel > distance {
-            v_peak = (distance * max_a).sqrt();
+            v_peak = (2.0 * distance / (1.0 / max_a + 1.0 / max_d)).sqrt();
             let t_accel = v_peak / max_a;
+            let t_decel = v_peak / max_d;
             t1 = t_accel;
             t2 = t_accel;
-            total_time = 2.0 * t_accel;
+            total_time = t_accel + t_decel;
         } else {
             let t_accel = v_peak / max_a;
-            let d_cruise = distance - 2.0 * d_accel;
+            let d_cruise = distance - d_accel - d_decel;
             let t_cruise = d_cruise / v_peak;
+            let t_decel = v_peak / max_d;
             t1 = t_accel;
             t2 = t_accel + t_cruise;
-            total_time = t2 + t_accel;
+            total_time = t2 + t_decel;
         }
 
         Self {
@@ -217,6 +265,7 @@ impl TrapezoidalProfile {
             distance,
             max_v: v_peak,
             max_a,
+            max_d,
         }
     }
 
@@ -244,10 +293,8 @@ impl TrapezoidalProfile {
         } else {
             // decelerating
             let dt = t - self.t2;
-            // v(t) = max_v - a * dt
-            let a = -self.max_a;
+            let a = -self.max_d;
             let v = self.max_v + a * dt;
-            // p(t) = p_cruise + max_v * dt - 0.5 * a_decel * dt^2
             let p_accel = 0.5 * self.max_a * self.t1 * self.t1;
             let p_cruise = p_accel + self.max_v * (self.t2 - self.t1);
             let p = p_cruise + self.max_v * dt + 0.5 * a * dt * dt;

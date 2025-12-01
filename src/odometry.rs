@@ -88,12 +88,13 @@ impl Odometry {
 
         let theta = self.normalize_angle(imu_heading_rad);
         let dtheta = self.normalize_angle(theta - self.pose.heading);
-        // compensate rotation-induced wheel travel
-        let dx_robot = dp - dtheta * self.tracking_wheels.perpendicular_offset;
-        let dy_robot = ds + dtheta * self.tracking_wheels.parallel_offset;
+        let dx_robot = dp - dtheta * self.tracking_wheels.parallel_offset;
+        let dy_robot = ds - dtheta * self.tracking_wheels.perpendicular_offset;
 
-        self.pose.x += dx_robot * self.pose.heading.cos() - dy_robot * self.pose.heading.sin();
-        self.pose.y += dx_robot * self.pose.heading.sin() + dy_robot * self.pose.heading.cos();
+        let avg_heading = self.pose.heading + dtheta / 2.0;
+
+        self.pose.x += dx_robot * avg_heading.cos() - dy_robot * avg_heading.sin();
+        self.pose.y += dx_robot * avg_heading.sin() + dy_robot * avg_heading.cos();
         self.pose.heading = theta;
     }
 

@@ -234,7 +234,7 @@ impl Particles {
         if stddev <= 0.0 {
             return 0.0;
         }
-        // Box-Muller transform
+        // box-muller transform
         let u1 = next_f32(rng);
         let u2 = next_f32(rng);
         let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * PI * u2).cos();
@@ -379,7 +379,6 @@ impl Mcl {
             return;
         }
 
-        // Augmented MCL: update slow and fast averages
         let avg_weight = total_weight * INV_N;
         if self.w_slow == 0.0 {
             self.w_slow = avg_weight;
@@ -405,19 +404,13 @@ impl Mcl {
         let mut i = 0;
         // stochastic universal sampling
         for j in 0..N {
-            // Augmented MCL: random injection
+            // augmented MCL: random injection
             let random_prob = (1.0 - self.w_fast / self.w_slow).max(0.0);
             if next_f32(&mut self.rng) < random_prob {
-                // Inject random particle
                 let rx = (next_f32(&mut self.rng) * 2.0 - 1.0) * FIELD_HALF;
                 let ry = (next_f32(&mut self.rng) * 2.0 - 1.0) * FIELD_HALF;
                 let rt = (next_f32(&mut self.rng) * 2.0 - 1.0) * PI;
                 
-                // We need to push a new particle. Since resampled_particles is just a struct of Vecs,
-                // we can't easily "push" a new struct. We have to push components.
-                // But wait, push_copy_from copies from `particles`.
-                // We need a way to push a raw particle.
-                // Let's add a helper or just push directly.
                 self.resampled_particles.x.push(rx);
                 self.resampled_particles.y.push(ry);
                 self.resampled_particles.theta.push(rt);

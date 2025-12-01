@@ -27,8 +27,9 @@ impl Robot {
             match action {
                 Action::DriveCurve(ref points) => {
                     println!("Goal: DriveCurve to {:?}", points.last().map(|(p, _)| p));
+                    let fast = points.last().map(|(_, s)| s.fast).unwrap_or(false);
                     self.chassis
-                        .drive_spline(points, 1.0, 5.0, 0.70)
+                        .drive_spline(points, 1.0, 5.0, 0.70, fast)
                         .await;
                 }
                 Action::DrivePtp(ref points) => {
@@ -42,19 +43,19 @@ impl Robot {
                 Action::DriveStraight(distance, settings) => {
                     println!("Goal: DriveStraight {:.2} inches", distance);
                     self.chassis
-                        .drive_straight(distance, settings.max_voltage, settings.is_reversed)
+                        .drive_straight(distance, settings.max_voltage, settings.is_reversed, settings.fast)
                         .await;
                 }
                 Action::TurnToPoint(pose, settings) => {
                     println!("Goal: TurnToPoint ({:.2}, {:.2})", pose.x, pose.y);
                     self.chassis
-                        .turn_to_point(pose.x, pose.y, settings.max_voltage, settings.is_reversed)
+                        .turn_to_point(pose.x, pose.y, settings.max_voltage, settings.is_reversed, settings.fast)
                         .await;
                 }
                 Action::TurnToAngle(angle, settings) => {
                     println!("Goal: TurnToAngle {:.2} degrees", angle);
                     self.chassis
-                        .turn_to_angle(angle, settings.max_voltage, settings.is_reversed)
+                        .turn_to_angle(angle, settings.max_voltage, settings.is_reversed, settings.fast)
                         .await;
                 }
                 Action::TriggerOnIndex(index, ref name) => {

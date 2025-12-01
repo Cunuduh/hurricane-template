@@ -15,6 +15,7 @@ struct IRPose {
 struct IRPoseSettings {
     is_reversed: bool,
     max_voltage: f64,
+    fast: bool,
 }
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum IRAction {
@@ -70,6 +71,7 @@ fn map_settings(s: IRPoseSettings) -> PoseSettings {
     PoseSettings {
         is_reversed: s.is_reversed,
         max_voltage: s.max_voltage,
+        fast: s.fast,
     }
 }
 

@@ -11,7 +11,7 @@ use core::{
 
 use vexide::{devices::smart::imu::InertialSensor, prelude::*};
 use crate::{
-    chassis::{Chassis, ChassisArgs, ChassisConfig},
+    chassis::{Chassis, ChassisArgs, ChassisAutonConfig},
     odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
     triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition},
@@ -343,16 +343,12 @@ impl Robot {
         let dist_right =
             DistanceSensor::new(peripherals.take_smart_port(17).expect("smart port 17"));
         let tw_config = TrackingWheelConfig {
-            parallel_offset: -0.020,
-            perpendicular_offset: -0.035,
+            parallel_offset: -0.072,
+            perpendicular_offset: 0.052,
             wheel_diameter: 2.0,
         };
 
-        let drive_pid = Pid::new(2.0, 0.0, 0.2, 0.0);
-        let turn_pid = Pid::new(9.0, 0.0, 0.8, 0.0);
-        let heading_pid = Pid::new(2.0, 0.0, 0.0, 0.0);
-
-        let config = ChassisConfig {
+        let config = ChassisAutonConfig {
             initial_pose: Pose {
                 x: 0.0,
                 y: 0.0,
@@ -363,14 +359,14 @@ impl Robot {
             track_width: 15.0,
             max_volts: 12.0,
             ff_ks: 0.75,
-            ff_kv: 0.1664,
-            ff_ka: 0.000829,
-            ff_kv_ang: 1.248,
-            ff_ka_ang: 0.0062175,
+            ff_kv: 0.1567,
+            ff_ka: 0.0202,
+            ff_kv_ang: 1.175,
+            ff_ka_ang: 0.10,
             dt: Duration::from_millis(10),
-            turn_pid,
-            heading_pid,
-            drive_pid,
+            turn_pid: Pid::new(9.0, 0.0, 0.3, 0.0),
+            heading_pid: Pid::new(3.0, 0.0, 0.0, 0.0),
+            drive_pid: Pid::new(0.5, 0.0, 0.05, 0.0),
             small_drive_exit_error: 0.1,
             small_drive_settle_time: Duration::from_millis(50),
             big_drive_exit_error: 0.5,
@@ -385,7 +381,14 @@ impl Robot {
             stall_velocity_threshold: 1.0,
             stall_time: Duration::from_millis(400),
 
-            t_accel: 0.5,
+            t_accel_ramsete: 0.75,
+            t_accel_drive: 0.75,
+            t_accel_turn: 0.75,
+
+            t_decel_ramsete: 1.0,
+            t_decel_drive: 1.0,
+            t_decel_turn: 1.0,
+
             tw_config,
         };
         let chassis = Chassis::new(ChassisArgs {
@@ -408,7 +411,7 @@ impl Robot {
             dist_right,
             dist_back,
             dist_left,
-            config,
+            auton_config: config,
             triggers: AUTON_TRIGGER_DEFINITIONS,
             ui,
         })
@@ -476,6 +479,9 @@ impl Compete for Robot {
                 } else {
                     self.chassis.start_block_park_macro();
                 }
+            }
+            if c_state.button_x.is_now_pressed() {
+                self.chassis.calibrate_tracking_wheels().await;
             }
             if c_state.button_up.is_now_pressed() {
                 self.chassis.toggle_block_park();
