@@ -1,25 +1,26 @@
-set_pose (-48.14, -14.945, -90.0)
+set_pose (-48.14, 0.0, -90.0)
 trigger_now "intake"
 trigger_now "scraper_down"
 
 drive_ptp
-    point (-48.14, -48.0) max_voltage=9
-    point (-60.0, -48.0) max_voltage=12 fast
-drive_for 300 max_voltage=3
+    point (-48.14, -48.0) max_voltage=12 fast
+    point (-60.0, -48.0) max_voltage=12
+drive_for 400 max_voltage=3
 turn_to_angle 180.0 fast
-drive_straight 29.5 max_voltage=12 reverse fast
+drive_straight 29.5 max_voltage=12 reverse
 trigger_now "intake_stop"
 trigger_now "outtake"
-wait 750
+trigger_now "reset_pos_y"
+wait 1000
 trigger_now "scraper_up"
 
-drive_straight 12.0 max_voltage=12 fast
+drive_to (-48.0, -48.0) max_voltage=12 fast
 turn_to_angle 45.0 max_voltage=12 fast
 trigger_now "intake_stop"
 trigger_now "intake"
 drive_curve
     point (-22.0, -22.0) max_voltage=12
-    point (-20.0, 20.0, 90.0) max_voltage=9
+    point (-20.0, 20.0, 90.0) max_voltage=12 fast
 turn_to_angle 135.0 max_voltage=12 fast
 drive_straight 16.0 max_voltage=12 reverse fast
 trigger_now "scraper_down"
@@ -28,7 +29,7 @@ wait 500
 trigger_now "intake_stop"
 trigger_now "intake"
 drive_ptp
-    point (-48.0, 48.0, 180.0) max_voltage=12
+    point (-48.0, 48.0) max_voltage=12
     point (-61.0, 48.0) max_voltage=12 fast
 drive_for 400 max_voltage=3
 turn_to_angle 180.0 fast

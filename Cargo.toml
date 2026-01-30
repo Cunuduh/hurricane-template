@@ -30,5 +30,5 @@ serde = { version = "1.0", default-features = false, features = ["alloc", "deriv
 opt-level = "z"
 strip = true
 lto = true
-codegen-units = 16
+codegen-units = 1
 incremental = true

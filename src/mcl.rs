@@ -90,11 +90,19 @@ fn prefix_sum(src: &[f32], dst: &mut [f32]) {
 }
 
 #[derive(Copy, Clone, Debug, Default)]
-pub struct Beam {
+pub struct DistanceSensorBeam {
     pub angle: f32,
     pub distance: f32,
     pub offset_x: f32,
     pub offset_y: f32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DistanceSensorConfig {
+    pub front: DistanceSensorBeam,
+    pub back: DistanceSensorBeam,
+    pub left: DistanceSensorBeam,
+    pub right: DistanceSensorBeam,
 }
 
 #[derive(Clone, Debug)]
@@ -190,7 +198,7 @@ impl Particles {
         }
     }
 
-    fn expected_point(&self, index: usize, beam: &Beam) -> (f32, f32, f32) {
+    fn expected_point(&self, index: usize, beam: &DistanceSensorBeam) -> (f32, f32, f32) {
         let theta = self.theta[index];
         let x = self.x[index];
         let y = self.y[index];
@@ -241,7 +249,7 @@ impl Particles {
         z0 * stddev
     }
 
-    fn update_weight(&mut self, beams: &[Beam], field_half: f32, stddev: f32, factor: f32) {
+    fn update_weight(&mut self, beams: &[DistanceSensorBeam], field_half: f32, stddev: f32, factor: f32) {
         if beams.is_empty() {
             for i in 0..self.len() {
                 self.weight[i] = INV_N;
@@ -327,7 +335,7 @@ impl Mcl {
         }
     }
 
-    pub fn run(&mut self, beams: &[Beam], delta_xy: (f64, f64), imu_heading: f64) -> Pose {
+    pub fn run(&mut self, beams: &[DistanceSensorBeam], delta_xy: (f64, f64), imu_heading: f64) -> Pose {
         self.update_step(delta_xy, imu_heading);
         // accumulate traveled distance for gated updates
         self.dist_since_update += (delta_xy.0.hypot(delta_xy.1)).abs();
@@ -363,7 +371,7 @@ impl Mcl {
         sum
     }
 
-    fn resample_step(&mut self, beams: &[Beam]) {
+    fn resample_step(&mut self, beams: &[DistanceSensorBeam]) {
         // keep particles within field before computing weights
         self.particles.repair_out_of_field(&mut self.rng, FIELD_HALF);
         self.particles

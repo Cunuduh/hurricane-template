@@ -7,45 +7,6 @@ use crate::{
     odometry::{Pos2Like, Pose},
 };
 
-
-pub fn interpolate_linear(
-    points: &[(Pose, PoseSettings)],
-    steps: usize,
-) -> Vec<(Pose, PoseSettings)> {
-    let n = points.len();
-    if n == 0 {
-        return Vec::new();
-    }
-    if n == 1 {
-        return vec![(points[0].0, points[0].1)];
-    }
-
-    let steps = steps.max(1);
-    let mut result = Vec::with_capacity((n - 1) * steps + 1);
-
-    for i in 0..(n - 1) {
-        let p1 = points[i].0;
-        let p2 = points[i + 1].0;
-        let settings = points[i].1;
-        let dx = p2.x - p1.x;
-        let dy = p2.y - p1.y;
-        let heading = dy.atan2(dx);
-
-        for step in 0..steps {
-            let t = step as f64 / steps as f64;
-            let x = p1.x + dx * t;
-            let y = p1.y + dy * t;
-            let mut pose = Pose { x, y, heading };
-            pose.heading = heading;
-            result.push((pose, settings));
-        }
-    }
-
-    result.push(points[n - 1]);
-    result
-}
-
-
 pub fn interpolate_curve(
     points: &[(Pose, PoseSettings)],
     step_size: f64,

@@ -1,6 +1,12 @@
 use core::f64::consts::PI;
 
+use serde::{Deserialize, Serialize};
 use vexide::prelude::{Float, Position};
+use crate::utils::normalize_angle;
+
+fn default_nan() -> f64 {
+    f64::NAN
+}
 
 pub trait Pos2Like {
     fn x(&self) -> f64;
@@ -13,10 +19,11 @@ pub trait Pos2Like {
     fn lerp(&self, other: &Self, t: f64) -> Self;
 }
 
-#[derive(Default, Copy, Clone, Debug)]
+#[derive(Default, Copy, Clone, Debug, Serialize, Deserialize)]
 pub struct Pose {
     pub x: f64,
     pub y: f64,
+    #[serde(default = "default_nan")]
     pub heading: f64,
 }
 impl Pose {
@@ -86,8 +93,8 @@ impl Odometry {
         self.prev_parallel_revs = p;
         self.prev_perpendicular_revs = q;
 
-        let theta = self.normalize_angle(imu_heading_rad);
-        let dtheta = self.normalize_angle(theta - self.pose.heading);
+        let theta = normalize_angle(imu_heading_rad);
+        let dtheta = normalize_angle(theta - self.pose.heading);
         let dx_robot = dp - dtheta * self.tracking_wheels.parallel_offset;
         let dy_robot = ds - dtheta * self.tracking_wheels.perpendicular_offset;
 
@@ -101,19 +108,9 @@ impl Odometry {
     pub fn pose(&self) -> Pose {
         self.pose
     }
-    pub fn reset(&mut self, pose: Pose) {
+    pub fn reset(&mut self, pose: Pose, parallel_revs: f64, perpendicular_revs: f64) {
         self.pose = pose;
-        self.prev_parallel_revs = 0.0;
-        self.prev_perpendicular_revs = 0.0;
-    }
-
-    fn normalize_angle(&self, mut angle: f64) -> f64 {
-        while angle > PI {
-            angle -= 2.0 * PI;
-        }
-        while angle < -PI {
-            angle += 2.0 * PI;
-        }
-        angle
+        self.prev_parallel_revs = parallel_revs;
+        self.prev_perpendicular_revs = perpendicular_revs;
     }
 }

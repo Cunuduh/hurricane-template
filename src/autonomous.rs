@@ -337,7 +337,10 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         self.update_state();
         let start_pose = self.odometry.pose();
-        let target_heading = (target.y - start_pose.y).atan2(target.x - start_pose.x);
+        let mut target_heading = (target.y - start_pose.y).atan2(target.x - start_pose.x);
+        if settings.is_reversed {
+            target_heading = normalize_angle(target_heading + PI);
+        }
 
         let drive_direction = if settings.is_reversed { -1.0 } else { 1.0 };
 
@@ -452,7 +455,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             let mut drive_output = (u_ff + drive_pid.next(error, dt))
                 .clamp(-settings.max_voltage, settings.max_voltage);
             // scale down linear speed when there is a large heading error
-            const TURN_BIAS: f64 = 0.8;
+            const TURN_BIAS: f64 = 0.5;
             let turn_bias_scale = (1.0 - ((1.0 - heading_error.cos()) / TURN_BIAS)).clamp(0.0, 1.0);
             drive_output *= turn_bias_scale;
             drive_output *= drive_direction;
@@ -530,6 +533,157 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let p = self.mcl_pose();
         let a = (y - p.y).atan2(x - p.x);
         self.turn_to_angle(a.to_degrees(), v, reverse, fast).await;
+    }
+
+    pub async fn drive_swing(&mut self, a_deg: f64, left_v: f64, right_v: f64, fast: bool) {
+        let mut pid = self.config.turn_pid;
+        pid.reset();
+        self.stall_timer = None;
+        let a = normalize_angle(a_deg.to_radians());
+        let initial_heading = self.mcl_pose().heading;
+
+        let mut t0 = Instant::now();
+        let mut ts: Option<Instant> = None;
+        let mut tb: Option<Instant> = None;
+        let start_time = Instant::now();
+
+        let small_exit_deg = self.config.small_turn_exit_error;
+        let big_exit_deg = self.config.big_turn_exit_error;
+
+        let diff = normalize_angle(a - initial_heading);
+        let direction = diff.signum();
+        let planned_delta = diff.abs();
+
+        // estimate max angular velocity from the voltage differential
+        let max_linear_vel = (self.motor_free_rpm / self.config.ext_gear_ratio / 60.0)
+            * (self.config.wheel_diameter * PI);
+        let v_diff = (right_v - left_v).abs();
+        let v_ratio = v_diff / self.config.max_volts;
+        let max_angular_vel = (2.0 * max_linear_vel / self.config.track_width) * v_ratio;
+
+        let max_v = max_angular_vel.max(0.5);
+        let max_a = max_angular_vel / self.config.t_accel_turn;
+        let max_d = max_angular_vel / self.config.t_decel_turn;
+
+        let profile = TrapezoidalProfile1D::new(planned_delta, max_v, max_a, max_d);
+
+        let safety_timeout =
+            Duration::from_millis(((profile.total_time * 1000.0) as u64).saturating_add(500));
+
+        loop {
+            let t = Instant::now();
+            let dt = t.duration_since(t0).as_secs_f64();
+
+            if dt < self.config.dt.as_secs_f64() {
+                sleep(self.config.dt - t.duration_since(t0)).await;
+                continue;
+            }
+            t0 = t;
+
+            self.update_state();
+            self.service_autonomous_intake();
+            if t.duration_since(start_time) >= safety_timeout {
+                println!("drive_swing: timeout");
+                break;
+            }
+            let h = self.mcl_pose().heading;
+            let dh = normalize_angle(h - initial_heading);
+            let actions = self.triggers.check_angle(dh.to_degrees());
+            self.apply_trigger_actions(&actions);
+            let e = normalize_angle(a - h);
+
+            if self.check_stall(fast) {
+                println!("drive_swing: stall detected");
+                break;
+            }
+
+            let e2 = e.to_degrees().abs();
+            if e2 <= small_exit_deg {
+                tb = None;
+                if ts.is_none() {
+                    ts = Some(Instant::now());
+                }
+                if let Some(t) = ts
+                    && t.elapsed() >= self.config.small_turn_settle_time
+                {
+                    println!("drive_swing: done (small error)");
+                    break;
+                }
+            } else {
+                ts = None;
+                if e2 <= big_exit_deg {
+                    if fast {
+                        println!("drive_swing: done (fast)");
+                        break;
+                    }
+                    if tb.is_none() {
+                        tb = Some(Instant::now());
+                    }
+                    if let Some(t) = tb
+                        && t.elapsed() >= self.config.big_turn_settle_time
+                    {
+                        println!("drive_swing: done (big error)");
+                        break;
+                    }
+                } else {
+                    tb = None;
+                }
+            }
+
+            let elapsed = t.duration_since(start_time).as_secs_f64();
+            let (p_ref, v_ref, a_ref) = profile.sample(elapsed);
+
+            let kv = self.config.ff_kv_ang;
+            let ka = self.config.ff_ka_ang;
+            let ks = self.config.ff_ks;
+
+            // feedforward for angular motion, scaled by direction
+            let u_ff = (kv * v_ref + ka * a_ref) * direction;
+
+            let target_h = initial_heading + direction * p_ref;
+            let error_h = normalize_angle(target_h - h);
+
+            let u_fb = pid.next(error_h, dt);
+
+            // scale base voltages by profile progress (ramp up/down)
+            let progress_scale = if profile.total_time > 1e-6 {
+                (v_ref / max_v).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+
+            let base_lv = left_v * progress_scale;
+            let base_rv = right_v * progress_scale;
+
+            // apply ff + fb as differential correction
+            let mut lv = base_lv - (u_ff + u_fb);
+            let mut rv = base_rv + (u_ff + u_fb);
+
+            if lv.abs() > 1e-3 {
+                lv += ks * lv.signum();
+            }
+            if rv.abs() > 1e-3 {
+                rv += ks * rv.signum();
+            }
+
+            lv = lv.clamp(-self.config.max_volts, self.config.max_volts);
+            rv = rv.clamp(-self.config.max_volts, self.config.max_volts);
+
+            for m in self.left_motors.iter_mut() {
+                let _ = m.set_voltage(lv);
+            }
+            for m in self.right_motors.iter_mut() {
+                let _ = m.set_voltage(rv);
+            }
+        }
+
+        for m in self
+            .left_motors
+            .iter_mut()
+            .chain(self.right_motors.iter_mut())
+        {
+            let _ = m.brake(BrakeMode::Brake);
+        }
     }
 
     pub async fn turn_to_angle(&mut self, a_deg: f64, v: f64, reverse: bool, fast: bool) {
@@ -699,7 +853,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         let mut parallel_offset_sum = 0.0;
         let mut perpendicular_offset_sum = 0.0;
 
-        self.odometry.reset(Pose::default());
+        self.odometry.reset(Pose::default(), 0.0, 0.0);
         let _ = self.imu.reset_heading();
 
         for i in 0..ITERATIONS {

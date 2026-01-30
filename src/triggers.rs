@@ -27,6 +27,13 @@ pub enum IntakeCommand {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ResetAxis {
+    X,
+    Y,
+    XY,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TriggerAction {
     Intake(IntakeCommand),
     SetPneumatic {
@@ -36,7 +43,7 @@ pub enum TriggerAction {
     TogglePneumatic(PneumaticTarget),
     SetColourSortEnabled(bool),
     SetAltColourSortEnabled(bool),
-    ResetXY,
+    ResetPos(ResetAxis),
 }
 
 pub struct TriggerDefinition {

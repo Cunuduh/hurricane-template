@@ -12,9 +12,10 @@ use core::{
 use vexide::{devices::smart::imu::InertialSensor, prelude::*};
 use crate::{
     chassis::{Chassis, ChassisArgs, ChassisAutonConfig},
+    mcl::{DistanceSensorBeam, DistanceSensorConfig},
     odometry::{Pose, TrackingWheelConfig},
     pid::Pid,
-    triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition},
+    triggers::{IntakeCommand, PneumaticTarget, ResetAxis, TriggerAction, TriggerDefinition},
 };
 static UI_SELECTED_ROUTE: AtomicUsize = AtomicUsize::new(0);
 static IS_RED_ALLIANCE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(true);
@@ -166,8 +167,16 @@ const AUTON_TRIGGER_DEFINITIONS: &[TriggerDefinition] = &[
         actions: &[TriggerAction::SetAltColourSortEnabled(false)],
     },
     TriggerDefinition {
-        name: "reset_xy",
-        actions: &[TriggerAction::ResetXY],
+        name: "reset_pos_x",
+        actions: &[TriggerAction::ResetPos(ResetAxis::X)],
+    },
+    TriggerDefinition {
+        name: "reset_pos_y",
+        actions: &[TriggerAction::ResetPos(ResetAxis::Y)],
+    },
+    TriggerDefinition {
+        name: "reset_pos_xy",
+        actions: &[TriggerAction::ResetPos(ResetAxis::XY)],
     },
 ];
 
@@ -347,7 +356,32 @@ impl Robot {
             perpendicular_offset: 0.052,
             wheel_diameter: 2.0,
         };
-
+        let dist_sensor_config = DistanceSensorConfig {
+            front: DistanceSensorBeam {
+                angle: 0.0,
+                offset_x: 3.25,
+                offset_y: 5.25,
+                distance: 0.0,
+            },
+            back: DistanceSensorBeam {
+                angle: core::f32::consts::PI,
+                offset_x: -5.0,
+                offset_y: -1.25,
+                distance: 0.0,
+            },
+            left: DistanceSensorBeam {
+                angle: core::f32::consts::FRAC_PI_2,
+                offset_x: -5.5,
+                offset_y: 1.625,
+                distance: 0.0,
+            },
+            right: DistanceSensorBeam {
+                angle: -core::f32::consts::FRAC_PI_2,
+                offset_x: 5.5,
+                offset_y: 1.625,
+                distance: 0.0,
+            },
+        };
         let config = ChassisAutonConfig {
             initial_pose: Pose {
                 x: 0.0,
@@ -364,7 +398,7 @@ impl Robot {
             ff_kv_ang: 1.175,
             ff_ka_ang: 0.10,
             dt: Duration::from_millis(10),
-            turn_pid: Pid::new(9.0, 0.0, 0.3, 0.0),
+            turn_pid: Pid::new(10.0, 0.0, 0.3, 0.0),
             heading_pid: Pid::new(3.0, 0.0, 0.0, 0.0),
             drive_pid: Pid::new(0.5, 0.0, 0.05, 0.0),
             small_drive_exit_error: 0.1,
@@ -378,21 +412,22 @@ impl Robot {
             big_turn_settle_time: Duration::from_millis(100),
 
             stall_current_threshold: 2.4,
-            stall_velocity_threshold: 1.0,
+            stall_velocity_threshold: 5.0,
             stall_time: Duration::from_millis(400),
 
-            t_accel_ramsete: 0.75,
-            t_accel_drive: 0.75,
+            t_accel_ramsete: 0.33,
+            t_accel_drive: 0.33,
             t_accel_turn: 0.75,
 
-            t_decel_ramsete: 1.0,
-            t_decel_drive: 1.0,
+            t_decel_ramsete: 0.75,
+            t_decel_drive: 0.75,
             t_decel_turn: 1.0,
 
             centripetal_accel_limit: 0.67 * 39.37,
-            velocity_exit_threshold: 1.0,
+            velocity_exit_threshold: 0.25,
 
             tw_config,
+            dist_sensor_config,
         };
         let chassis = Chassis::new(ChassisArgs {
             controller: peripherals
@@ -426,7 +461,7 @@ impl Robot {
 
 impl Compete for Robot {
     async fn autonomous(&mut self) {
-        self.chassis.odometry.reset(Default::default());
+        self.chassis.odometry.reset(Default::default(), 0.0, 0.0);
         let _ = self.chassis.imu.reset_heading();
         let is_red = IS_RED_ALLIANCE.load(Ordering::Relaxed);
         let routines = routines::load_all(is_red);

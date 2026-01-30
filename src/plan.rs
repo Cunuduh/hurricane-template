@@ -1,17 +1,20 @@
 extern crate alloc;
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use vexide::prelude::*;
 
 use crate::{Robot, chassis::PoseSettings, odometry::Pose, triggers::TriggerCondition};
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Action {
-    DriveCurve(Box<[(Pose, PoseSettings)]>),
-    DrivePtp(Box<[(Pose, PoseSettings)]>),
+    DriveCurve(Vec<(Pose, PoseSettings)>),
+    DrivePtp(Vec<(Pose, PoseSettings)>),
     DriveToPoint(Pose, PoseSettings),
     DriveStraight(f64, PoseSettings),
     TurnToPoint(Pose, PoseSettings),
     TurnToAngle(f64, PoseSettings),
+    DriveSwing(f64, f64, f64, PoseSettings),
     TriggerOnIndex(usize, String),
     TriggerOnDistance(f64, String),
     TriggerOnAngle(f64, String),
@@ -29,12 +32,12 @@ impl Robot {
                     println!("Goal: DriveCurve to {:?}", points.last().map(|(p, _)| p));
                     let fast = points.last().map(|(_, s)| s.fast).unwrap_or(false);
                     self.chassis
-                        .drive_spline(points, 1.0, 5.0, 0.70, fast)
+                        .drive_spline(points.as_slice(), 1.0, 5.0, 0.70, fast)
                         .await;
                 }
                 Action::DrivePtp(ref points) => {
                     println!("Goal: DrivePtp to {:?}", points.last().map(|(p, _)| p));
-                    self.chassis.drive_ptp(points).await;
+                    self.chassis.drive_ptp(points.as_slice()).await;
                 }
                 Action::DriveToPoint(pose, settings) => {
                     println!("Goal: DriveToPoint to {:?}", pose);
@@ -56,6 +59,12 @@ impl Robot {
                     println!("Goal: TurnToAngle {:.2} degrees", angle);
                     self.chassis
                         .turn_to_angle(angle, settings.max_voltage, settings.is_reversed, settings.fast)
+                        .await;
+                }
+                Action::DriveSwing(angle, left_v, right_v, settings) => {
+                    println!("Goal: DriveSwing to {:.2} degrees (L: {:.2}V, R: {:.2}V)", angle, left_v, right_v);
+                    self.chassis
+                        .drive_swing(angle, left_v, right_v, settings.fast)
                         .await;
                 }
                 Action::TriggerOnIndex(index, ref name) => {

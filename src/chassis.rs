@@ -1,5 +1,6 @@
 use core::time::Duration;
 extern crate alloc;
+use serde::{Deserialize, Serialize};
 use slint::SharedString;
 use vexide::{
     devices::{
@@ -10,31 +11,29 @@ use vexide::{
     prelude::*,
     time::Instant,
 };
-use core::f64::consts::PI;
 use crate::{
     VexSelector,
-    mcl::{Beam, Mcl},
+    mcl::{DistanceSensorBeam, Mcl},
     odometry::{Odometry, Pose, TrackingWheelConfig},
     pid::Pid,
-    triggers::{IntakeCommand, PneumaticTarget, TriggerAction, TriggerDefinition, TriggerManager},
+    triggers::{IntakeCommand, PneumaticTarget, ResetAxis, TriggerAction, TriggerDefinition, TriggerManager},
     utils::normalize_angle,
 };
 
 const USE_MCL_LOCALIZATION: bool = false;
 
-#[derive(Copy, Clone, Debug)]
+#[derive(Copy, Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PoseSettings {
+    #[serde(default)]
     pub is_reversed: bool,
+    #[serde(default = "PoseSettings::default_voltage")]
     pub max_voltage: f64,
+    #[serde(default)]
     pub fast: bool,
 }
-impl Default for PoseSettings {
-    fn default() -> Self {
-        Self {
-            is_reversed: false,
-            max_voltage: 6.0,
-            fast: false,
-        }
+impl PoseSettings {
+    fn default_voltage() -> f64 {
+        6.0
     }
 }
 pub struct ChassisAutonConfig {
@@ -78,6 +77,7 @@ pub struct ChassisAutonConfig {
     pub velocity_exit_threshold: f64,
 
     pub tw_config: TrackingWheelConfig,
+    pub dist_sensor_config: crate::mcl::DistanceSensorConfig,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -373,7 +373,7 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         let prev_pose = self.odometry.pose();
         self.odometry
-            .update(parallel_pos, perpendicular_pos, imu_heading_rad);
+            .update(parallel_pos, Position::from_revolutions(0.0), imu_heading_rad);
         let curr_pose = self.odometry.pose();
         let dx = curr_pose.x - prev_pose.x;
         let dy = curr_pose.y - prev_pose.y;
@@ -393,52 +393,29 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             return;
         }
 
-        let mut beams: alloc::vec::Vec<Beam> = alloc::vec::Vec::with_capacity(4);
-        // ignore front distance when scraper is up (low)
+        let dist_cfg = self.config.dist_sensor_config;
+        let mut beams: alloc::vec::Vec<DistanceSensorBeam> = alloc::vec::Vec::with_capacity(4);
         if !self.scraper_up
-            && let Ok(o) = self.dist_front.object()
-            && let Some(obj) = o
+            && let Ok(Some(obj)) = self.dist_front.object()
         {
-            let inches = (obj.distance as f64) / 25.4;
-            beams.push(Beam {
-                angle: 0.0,
-                distance: inches as f32,
-                offset_x: 3.25,
-                offset_y: 5.25,
-            });
+            let mut b = dist_cfg.front;
+            b.distance = (obj.distance as f32) / 25.4;
+            beams.push(b);
         }
-        if let Ok(o) = self.dist_right.object()
-            && let Some(obj) = o
-        {
-            let inches = (obj.distance as f64) / 25.4;
-            beams.push(Beam {
-                angle: -core::f32::consts::FRAC_PI_2,
-                distance: inches as f32,
-                offset_x: 5.5,
-                offset_y: 1.625,
-            });
+        if let Ok(Some(obj)) = self.dist_right.object() {
+            let mut b = dist_cfg.right;
+            b.distance = (obj.distance as f32) / 25.4;
+            beams.push(b);
         }
-        if let Ok(o) = self.dist_back.object()
-            && let Some(obj) = o
-        {
-            let inches = (obj.distance as f64) / 25.4;
-            beams.push(Beam {
-                angle: core::f32::consts::PI,
-                distance: inches as f32,
-                offset_x: -5.0,
-                offset_y: -1.25,
-            });
+        if let Ok(Some(obj)) = self.dist_back.object() {
+            let mut b = dist_cfg.back;
+            b.distance = (obj.distance as f32) / 25.4;
+            beams.push(b);
         }
-        if let Ok(o) = self.dist_left.object()
-            && let Some(obj) = o
-        {
-            let inches = (obj.distance as f64) / 25.4;
-            beams.push(Beam {
-                angle: core::f32::consts::FRAC_PI_2,
-                distance: inches as f32,
-                offset_x: -5.5,
-                offset_y: 1.625,
-            });
+        if let Ok(Some(obj)) = self.dist_left.object() {
+            let mut b = dist_cfg.left;
+            b.distance = (obj.distance as f32) / 25.4;
+            beams.push(b);
         }
 
         let est = self.mcl.run(&beams, (dx, dy), imu_heading_rad);
@@ -451,66 +428,127 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         self.last_mcl_pose
     }
 
-    pub fn reset_xy(&mut self) {
+    pub fn reset_pos(&mut self, axis: ResetAxis) {
+        const FIELD_HALF: f64 = 72.0;
+        const ANGLE_TOLERANCE: f64 = 20.0;
+
         let pose = self.odometry.pose();
         let heading = pose.heading;
+        let dist_cfg = self.config.dist_sensor_config;
+
+        let reset_x = matches!(axis, ResetAxis::X | ResetAxis::XY);
+        let reset_y = matches!(axis, ResetAxis::Y | ResetAxis::XY);
 
         let mut x_sum = 0.0;
         let mut x_count = 0;
         let mut y_sum = 0.0;
         let mut y_count = 0;
 
-        let mut process = |dist: f64, offset_x: f64, offset_y: f64, angle_offset: f64| {
-            let sensor_heading = normalize_angle(heading + angle_offset);
-            let h_deg = sensor_heading.to_degrees();
+        fn process_beam(
+            beam: DistanceSensorBeam,
+            dist: f64,
+            heading: f64,
+            x_sum: &mut f64,
+            x_count: &mut i32,
+            y_sum: &mut f64,
+            y_count: &mut i32,
+            reset_x: bool,
+            reset_y: bool,
+        ) {
+            let global_angle = normalize_angle(heading + beam.angle as f64);
+            let c = global_angle.cos();
+            let s = global_angle.sin();
+            let ct = heading.cos();
+            let st = heading.sin();
+            let ox = beam.offset_x as f64;
+            let oy = beam.offset_y as f64;
+            let sx = ox * ct - oy * st;
+            let sy = ox * st + oy * ct;
 
-            if h_deg.abs() < 20.0 {
-                let term = offset_x * heading.cos() - offset_y * heading.sin()
-                    + dist * sensor_heading.cos();
-                x_sum += 72.0 - term;
-                x_count += 1;
+            let angle_deg = global_angle.to_degrees();
+            if reset_x {
+                if angle_deg.abs() < ANGLE_TOLERANCE {
+                    *x_sum += FIELD_HALF - (sx + dist * c);
+                    *x_count += 1;
+                } else if (angle_deg.abs() - 180.0).abs() < ANGLE_TOLERANCE {
+                    *x_sum += -FIELD_HALF - (sx + dist * c);
+                    *x_count += 1;
+                }
             }
-            else if (h_deg.abs() - 180.0).abs() < 20.0 {
-                let term = offset_x * heading.cos() - offset_y * heading.sin()
-                    + dist * sensor_heading.cos();
-                x_sum += -72.0 - term;
-                x_count += 1;
+            if reset_y {
+                if (angle_deg - 90.0).abs() < ANGLE_TOLERANCE {
+                    *y_sum += FIELD_HALF - (sy + dist * s);
+                    *y_count += 1;
+                } else if (angle_deg + 90.0).abs() < ANGLE_TOLERANCE {
+                    *y_sum += -FIELD_HALF - (sy + dist * s);
+                    *y_count += 1;
+                }
             }
-            else if (h_deg - 90.0).abs() < 20.0 {
-                let term = offset_x * heading.sin() + offset_y * heading.cos()
-                    + dist * sensor_heading.sin();
-                y_sum += 72.0 - term;
-                y_count += 1;
-            }
-            else if (h_deg + 90.0).abs() < 20.0 {
-                let term = offset_x * heading.sin() + offset_y * heading.cos()
-                    + dist * sensor_heading.sin();
-                y_sum += -72.0 - term;
-                y_count += 1;
-            }
-        };
+        }
 
         if !self.scraper_up {
             if let Ok(Some(obj)) = self.dist_front.object() {
-                process(obj.distance as f64 / 25.4, 3.25, 5.25, 0.0);
+                process_beam(
+                    dist_cfg.front,
+                    obj.distance as f64 / 25.4,
+                    heading,
+                    &mut x_sum,
+                    &mut x_count,
+                    &mut y_sum,
+                    &mut y_count,
+                    reset_x,
+                    reset_y,
+                );
             }
         }
-        if let Ok(Some(obj)) = self.dist_right.object() {
-            process(obj.distance as f64 / 25.4, 5.5, 1.625, -PI / 2.0);
-        }
         if let Ok(Some(obj)) = self.dist_back.object() {
-            process(obj.distance as f64 / 25.4, -5.0, -1.25, PI);
+            process_beam(
+                dist_cfg.back,
+                obj.distance as f64 / 25.4,
+                heading,
+                &mut x_sum,
+                &mut x_count,
+                &mut y_sum,
+                &mut y_count,
+                reset_x,
+                reset_y,
+            );
         }
         if let Ok(Some(obj)) = self.dist_left.object() {
-            process(obj.distance as f64 / 25.4, -5.5, 1.625, PI / 2.0);
+            process_beam(
+                dist_cfg.left,
+                obj.distance as f64 / 25.4,
+                heading,
+                &mut x_sum,
+                &mut x_count,
+                &mut y_sum,
+                &mut y_count,
+                reset_x,
+                reset_y,
+            );
+        }
+        if let Ok(Some(obj)) = self.dist_right.object() {
+            process_beam(
+                dist_cfg.right,
+                obj.distance as f64 / 25.4,
+                heading,
+                &mut x_sum,
+                &mut x_count,
+                &mut y_sum,
+                &mut y_count,
+                reset_x,
+                reset_y,
+            );
         }
 
         let mut new_pose = pose;
         if x_count > 0 {
             new_pose.x = x_sum / x_count as f64;
+            println!("reset_pos: x {:.2} -> {:.2}", pose.x, new_pose.x);
         }
         if y_count > 0 {
             new_pose.y = y_sum / y_count as f64;
+            println!("reset_pos: y {:.2} -> {:.2}", pose.y, new_pose.y);
         }
 
         if x_count > 0 || y_count > 0 {
@@ -592,7 +630,6 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
             }
             TriggerAction::SetAltColourSortEnabled(enabled) => {
                 self.alt_colour_sort_enabled = enabled;
-                // ensure solenoid is off when switching alt mode
                 if enabled {
                     let _ = self.colour_sort.set_low();
                     self.colour_sort_activation_time = None;
@@ -603,8 +640,8 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
                     self.alt_colour_last_enemy = false;
                 }
             }
-            TriggerAction::ResetXY => {
-                self.reset_xy();
+            TriggerAction::ResetPos(axis) => {
+                self.reset_pos(axis);
             }
         }
     }
@@ -678,10 +715,12 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
     pub fn check_stall(&mut self, fast: bool) -> bool {
         let mut total_current = 0.0;
+        let mut total_velocity = 0.0;
         let mut num_motors = 0;
 
         for motor in self.left_motors.iter().chain(self.right_motors.iter()) {
             total_current += motor.current().unwrap_or_default().abs();
+            total_velocity += motor.velocity().unwrap_or_default().abs();
             num_motors += 1;
         }
 
@@ -690,9 +729,14 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
         } else {
             0.0
         };
+        let avg_velocity = if num_motors > 0 {
+            total_velocity / num_motors as f64
+        } else {
+            0.0
+        };
 
         let stalled = avg_current >= self.config.stall_current_threshold
-            && self.pose_velocity <= self.config.stall_velocity_threshold;
+            && avg_velocity <= self.config.stall_velocity_threshold;
 
         if stalled {
             if fast {
@@ -761,8 +805,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
     }
 
     pub fn set_pose(&mut self, pose: Pose) {
-        self.odometry.reset(pose);
-        // when resetting pose manually, we assume high confidence, so small variance
+        let parallel_revs = self.parallel_wheel.position().unwrap_or_default().as_revolutions();
+        let perpendicular_revs = self.perpendicular_wheel.position().unwrap_or_default().as_revolutions();
+        self.odometry.reset(pose, parallel_revs, perpendicular_revs);
         let variance = (1.0, 1.0, (2.0_f32).to_radians());
         self.mcl = Mcl::new(pose, variance);
         self.last_mcl_pose = pose;

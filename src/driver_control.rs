@@ -579,14 +579,9 @@ impl<const L: usize, const R: usize, const I: usize> Chassis<L, R, I> {
 
         let mut any_stalled = false;
         for m in self.intake_motors.iter() {
-            let current = m.current().unwrap_or_default();
+            let current = m.current().unwrap_or_default().abs();
             let velocity = m.velocity().unwrap_or_default().abs();
             if current >= current_thresh && velocity <= vel_thresh {
-                let port = m.port_number();
-                println!(
-                    "intake_stalled: motor port {} current={:.3}A velocity={:.3} (thresh curr={:.3}, vel={:.3})",
-                    port, current, velocity, current_thresh, vel_thresh
-                );
                 any_stalled = true;
             }
         }
